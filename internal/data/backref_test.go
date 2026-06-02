@@ -45,6 +45,10 @@ func TestBackrefEncodeDecodeRoundTrip(t *testing.T) {
 			name: "zero mtime stays zero",
 			in:   Backref{BucketID: bid, Key: "k", VersionID: "v", ChunkIdx: 4},
 		},
+		{
+			name: "sse algorithm label round-trips (US-004 rebuild-index)",
+			in:   Backref{BucketID: bid, Key: "enc", VersionID: uuid.New().String(), ChunkIdx: 0, Mtime: mtime, SSEAlgo: SSEAlgorithmKMS},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -70,6 +74,9 @@ func TestBackrefEncodeDecodeRoundTrip(t *testing.T) {
 			}
 			if !got.Mtime.Equal(tc.in.Mtime) {
 				t.Errorf("Mtime: want %v, got %v", tc.in.Mtime, got.Mtime)
+			}
+			if got.SSEAlgo != tc.in.SSEAlgo {
+				t.Errorf("SSEAlgo: want %q, got %q", tc.in.SSEAlgo, got.SSEAlgo)
 			}
 		})
 	}
@@ -110,6 +117,19 @@ func TestDecodeBackrefRejectsMalformed(t *testing.T) {
 				b[0] = BackrefSchemaV1
 				b[29] = 0xFF
 				b[30] = 0xFF
+				return b
+			}(),
+			expectedErr: ErrBackrefMalformed,
+		},
+		{
+			name: "sse length overruns buffer",
+			in: func() []byte {
+				b := make([]byte, backrefHeaderLen)
+				b[0] = BackrefSchemaV1
+				// verLen=0 (bytes 29:31), sseLen=0xFFFF (bytes 31:33) — trips
+				// the sseLen term of the bounds check independently of verLen.
+				b[31] = 0xFF
+				b[32] = 0xFF
 				return b
 			}(),
 			expectedErr: ErrBackrefMalformed,

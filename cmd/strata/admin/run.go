@@ -62,7 +62,7 @@ func (a *app) run(ctx context.Context) error {
 	principal := root.String("principal", os.Getenv("STRATA_ADMIN_PRINCIPAL"), "X-Test-Principal header value (test harness shortcut)")
 	jsonOut := root.Bool("json", false, "emit raw JSON instead of human-formatted output")
 	root.Usage = func() {
-		fmt.Fprintln(a.err, "usage: strata admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap|slo-report|bench-gc|bench-lifecycle> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata admin rewrap [--target-key-id ID] [--dry-run] [--batch N]\n  slo-report takes no subcommand: strata admin slo-report [--prometheus-url URL] [--window 7d|30d|90d] [--out FILE] [--format markdown|json] [--alertmanager-url URL]\n  bench-gc / bench-lifecycle take no subcommand: strata admin bench-gc [--entries N] [--concurrency M]")
+		fmt.Fprintln(a.err, "usage: strata admin [global flags] <iam|lifecycle|gc|sse|replicate|bucket|rewrap|slo-report|bench-gc|bench-lifecycle|rebuild-index> <subcommand> [flags]\n  bucket subcommands: inspect | reshard\n  rewrap takes no subcommand: strata admin rewrap [--target-key-id ID] [--dry-run] [--batch N]\n  slo-report takes no subcommand: strata admin slo-report [--prometheus-url URL] [--window 7d|30d|90d] [--out FILE] [--format markdown|json] [--alertmanager-url URL]\n  bench-gc / bench-lifecycle take no subcommand: strata admin bench-gc [--entries N] [--concurrency M]\n  rebuild-index takes no subcommand: strata admin rebuild-index [--cluster ID] [--pool P] [--namespace NS] [--bucket-id UUID] [--force] [--dry-run]")
 		root.PrintDefaults()
 	}
 
@@ -81,6 +81,9 @@ func (a *app) run(ctx context.Context) error {
 	}
 	if len(rest) >= 1 && rest[0] == "bench-lifecycle" {
 		return a.cmdBenchLifecycle(ctx, *jsonOut, rest[1:])
+	}
+	if len(rest) >= 1 && rest[0] == "rebuild-index" {
+		return a.cmdRebuildIndex(ctx, *jsonOut, rest[1:])
 	}
 	if len(rest) < 2 {
 		root.Usage()

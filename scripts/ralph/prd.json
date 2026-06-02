@@ -125,8 +125,25 @@
         "Tests pass"
       ],
       "priority": 5,
+      "passes": true,
+      "notes": "Core ENGINE + CLI shipped. internal/rebuild/ Rebuilder: scans the data tier via a reconcile.ChunkScanner (reuse — no fork), groups chunks by US-001 back-reference {bucket_id,key,version_id}, orders by chunk_idx, gap-detects (a missing idx flags the version gapped — NEVER stitched into a short object), recomputes single-part ETag (MD5) + per-chunk CRC32C from rebuilt bytes (read chunk-by-chunk via 1-chunk-manifest GetChunks), sets IsLatest by back-reference mtime (max-mtime version among recoverable wins — correct across a Suspended-null version; ascending-mtime write order also puts the latest at the memory backend's insertion-order head), refuses to clobber a live manifest unless Force, supports DryRun (classify+report, no writes), BucketFilter (one bucket at a time), counts AbsentBackref (chunk w/o back-ref never attributed/rebuilt). SSE: reads Backref.SSEAlgo — non-empty => StatusUnrecoverableSSE, reported + NEVER written (plaintext-only, wrapped DEK lost with meta). Lost object metadata (Content-Type/user-meta/tags/ACL/storage-class) reported lost + defaulted, not fabricated. CLI: strata admin rebuild-index --cluster/--pool/--namespace/--bucket-id/--force/--dry-run (cmd/strata/admin/rebuild_index.go) — single-binary subcommand, connects directly to meta (buildRewrapMetaStore) + data (buildBenchDataBackend) + RADOSScanner, mirrors rewrap. Red/green on memory (fake scanner + memory data backend): versioned object rebuilt GET-able w/ correct bytes+ETag+version-order, IsLatest=v2-by-mtime; gapped + SSE rejected (no row); idempotent re-run skips, --force overwrites; dry-run writes nothing; absent-backref never rebuilt. Backref gained SSEAlgo field + wire (round-trip tested, algo LABEL only — no key material). SPLIT to US-004b: SSE-algo STAMPING at PUT (gateway+cephimpl+s3 don't populate SSEAlgo yet — until then a real-RADOS SSE object looks plaintext) + RADOS end-to-end (RADOSScanner has no per-chunk Size; needs a per-OID stat like US-003b). ROADMAP Known-latent US-004-split entry added. Full Linux build + vet green; admin pkg local build blocked only by darwin gosigar (CI-Linux compiles)."
+    },
+    {
+      "id": "US-004b",
+      "title": "rebuild-index SSE-algo stamping at PUT + RADOS end-to-end integration (trailing split)",
+      "description": "As an operator running rebuild-index against a real RADOS cluster, I want SSE objects detected (so they are reported unrecoverable, never rebuilt with a wrong ciphertext ETag) and the RADOS pool scan to surface per-chunk size so reconstruction reads bytes correctly. SPLIT from US-004 because the reconstruction ENGINE ships CI-green on memory via an injected fake scanner, while (1) populating Backref.SSEAlgo at write time spans the gateway + the integration-only cephimpl + s3 backends, and (2) the RADOS scanner needs a per-OID size probe (integration-only, mirrors the US-003b ChunkStater).",
+      "acceptanceCriteria": [
+        "Gateway putObject + copyObject populate BackrefAttrs.SSEAlgo from the chosen SSE disposition (Manifest.SSE) so the per-chunk back-reference records the encryption algorithm label",
+        "RADOS (cephimpl) + S3-passthrough PutChunks thread the SSEAlgo through into the stamped back-reference (xattr / x-amz-meta) — algorithm LABEL only, NO key material",
+        "reconcile.RADOSScanner surfaces per-chunk Size (a per-OID stat riding the enumeration, or extend the US-000 primitive) so rebuild-index reads chunk bytes correctly on RADOS; the S3 scanner reuses native object size",
+        "Red/green proof on the real RADOS backend: seed a NON-SSE bucket, wipe its manifest rows, run rebuild-index -> every object GET-able with correct bytes/size/version order; seed an SSE object -> reported unrecoverable, not served; a removed middle chunk -> flagged gapped, not truncated",
+        "make vet passes; RADOS + S3-backend legs under integration",
+        "ROADMAP 'Known latent bugs' US-004-split entry closed in the same commit",
+        "Tests pass"
+      ],
+      "priority": 12,
       "passes": false,
-      "notes": ""
+      "notes": "Trailing split from US-004 (engine + CLI + plaintext red/green on memory shipped). The Backref.SSEAlgo field + wire already exist (round-trip tested); this story only adds the WRITE-side stamping + the RADOS per-chunk-size probe. Pick up alongside the US-003b cephimpl ChunkStater integration work."
     },
     {
       "id": "US-005",

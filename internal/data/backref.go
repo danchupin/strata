@@ -50,8 +50,8 @@ const (
 
 	// backrefHeaderLen is the fixed-width prefix of the v1 wire form:
 	// schema(1) + bucketID(16) + mtimeUnixNano(8) + chunkIdx(4) +
-	// versionIDLen(2).
-	backrefHeaderLen = 1 + 16 + 8 + 4 + 2
+	// versionIDLen(2) + sseAlgoLen(2).
+	backrefHeaderLen = 1 + 16 + 8 + 4 + 2 + 2
 )
 
 // ErrBackrefMalformed is returned by DecodeBackref when the payload is too
@@ -79,6 +79,14 @@ type Backref struct {
 	VersionID string
 	ChunkIdx  int
 	Mtime     time.Time
+	// SSEAlgo names the server-side-encryption algorithm the object was
+	// written under ("AES256" / "aws:kms"), empty for a plaintext object.
+	// It carries the algorithm LABEL only — NEVER key material (no
+	// plaintext, no wrapped DEK; the DEK lives solely in meta.Object.SSEKey).
+	// rebuild-index (US-004) reads it to report an SSE object as
+	// unrecoverable from data alone rather than silently serving ciphertext
+	// it has no key to decrypt.
+	SSEAlgo string
 }
 
 // BackrefAttrs is the object-level identity carried on the data-plane ctx
@@ -89,19 +97,26 @@ type BackrefAttrs struct {
 	Key       string
 	VersionID string
 	Mtime     time.Time
+	// SSEAlgo is the server-side-encryption algorithm label of the object
+	// being written ("AES256" / "aws:kms"), empty for plaintext. Stamped
+	// into the per-chunk Backref so rebuild-index (US-004) can report SSE
+	// objects unrecoverable. Algorithm LABEL only — no key material.
+	SSEAlgo string
 }
 
 // EncodeBackref returns the compact versioned wire form:
 //
 //	schema(1) | bucketID(16) | mtimeUnixNano(8 BE) | chunkIdx(4 BE) |
-//	versionIDLen(2 BE) | versionID | key
+//	versionIDLen(2 BE) | sseAlgoLen(2 BE) | versionID | sseAlgo | key
 //
 // key is the trailing remainder (no length prefix needed — it's last).
-// Both VersionID and Key may be empty. A zero Mtime encodes as nanos=0.
+// VersionID, SSEAlgo, and Key may each be empty. A zero Mtime encodes as
+// nanos=0.
 func EncodeBackref(b Backref) []byte {
 	ver := []byte(b.VersionID)
+	sse := []byte(b.SSEAlgo)
 	key := []byte(b.Key)
-	out := make([]byte, backrefHeaderLen+len(ver)+len(key))
+	out := make([]byte, backrefHeaderLen+len(ver)+len(sse)+len(key))
 	out[0] = BackrefSchemaV1
 	copy(out[1:17], b.BucketID[:])
 	var nano int64
@@ -111,8 +126,10 @@ func EncodeBackref(b Backref) []byte {
 	binary.BigEndian.PutUint64(out[17:25], uint64(nano))
 	binary.BigEndian.PutUint32(out[25:29], uint32(b.ChunkIdx))
 	binary.BigEndian.PutUint16(out[29:31], uint16(len(ver)))
+	binary.BigEndian.PutUint16(out[31:33], uint16(len(sse)))
 	n := backrefHeaderLen
 	n += copy(out[n:], ver)
+	n += copy(out[n:], sse)
 	copy(out[n:], key)
 	return out
 }
@@ -135,11 +152,15 @@ func DecodeBackref(p []byte) (Backref, error) {
 	}
 	b.ChunkIdx = int(binary.BigEndian.Uint32(p[25:29]))
 	verLen := int(binary.BigEndian.Uint16(p[29:31]))
-	if backrefHeaderLen+verLen > len(p) {
+	sseLen := int(binary.BigEndian.Uint16(p[31:33]))
+	if backrefHeaderLen+verLen+sseLen > len(p) {
 		return Backref{}, ErrBackrefMalformed
 	}
-	b.VersionID = string(p[backrefHeaderLen : backrefHeaderLen+verLen])
-	b.Key = string(p[backrefHeaderLen+verLen:])
+	verEnd := backrefHeaderLen + verLen
+	sseEnd := verEnd + sseLen
+	b.VersionID = string(p[backrefHeaderLen:verEnd])
+	b.SSEAlgo = string(p[verEnd:sseEnd])
+	b.Key = string(p[sseEnd:])
 	return b, nil
 }
 

@@ -662,6 +662,21 @@ Non-goals:
   RADOS + S3-passthrough backends — only the memory backend implements `data.ChunkStater` so far (CI-green via the
   injected fake prober), so a dangling job against a default-tag RADOS build records an error and quarantines nothing
   (never flags a healthy object on a probe it could not run). Tracked as `US-003b` (to add). (`ralph/metadata-data-reconcile` US-003)
+- **P2 — `rebuild-index` SSE-algo stamping at PUT + RADOS end-to-end integration deferred (US-004 split).** The
+  last-resort `strata admin rebuild-index` (US-004) ships the full reconstruction ENGINE (`internal/rebuild`):
+  it groups scanned chunks by their US-001 back-reference `{bucket_id, key, version_id}`, orders by `chunk_idx`,
+  gap-detects (a partial object is flagged, never stitched short + served), recomputes the single-part ETag +
+  per-chunk CRC32C from the rebuilt bytes, sets `IsLatest` by the back-reference `mtime` (correct across a
+  Suspended-null version), refuses to clobber a live manifest unless `--force`, and reports an SSE object
+  unrecoverable (reads `Backref.SSEAlgo`) — all CI-green on the memory backend via an injected fake scanner.
+  Two pieces are split out: (1) **SSE-algo STAMPING at PUT** — `Backref`/`BackrefAttrs` carry the new `SSEAlgo`
+  label field and the wire form encodes it, but the gateway (`putObject`/`copyObject`) + the RADOS (`cephimpl`)
+  + S3-passthrough backends do NOT yet POPULATE it from the chosen SSE disposition, so until US-004b every
+  scanned chunk looks plaintext and an SSE object would be rebuilt with a wrong (ciphertext) ETag rather than
+  reported unrecoverable. (2) **RADOS end-to-end** — `reconcile.RADOSScanner` does not surface per-chunk `Size`
+  (pool enumeration yields OID + back-reference, not size), so a real RADOS rebuild needs a per-OID stat probe
+  (mirrors the US-003b `ChunkStater`); the engine + CLI are wired but the RADOS leg is integration-only. Both
+  tracked as `US-004b` (to add). (`ralph/metadata-data-reconcile` US-004)
 - **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
   reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
   the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but

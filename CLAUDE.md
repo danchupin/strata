@@ -149,6 +149,25 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   never a silent corrupt 5xx). delete + RADOS/S3 prober → US-003b.
   strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
                   --target-key-id. Idempotent + resumable via rewrap_progress.
+  strata admin rebuild-index -> LAST-RESORT manifest-index rebuild from a
+                  data-tier scan (US-004 metadata-data-reconcile). Subcommand
+                  (single-binary), connects directly to meta + data (mirrors
+                  rewrap), NOT the gateway HTTP surface. internal/rebuild engine:
+                  scans the pool via reconcile.ChunkScanner (RADOSScanner →
+                  US-000 EnumeratePool), groups chunks by US-001 back-reference
+                  {bucket_id,key,version_id}, orders by chunk_idx, gap-detects
+                  (missing idx → version flagged gapped, NEVER stitched short +
+                  served), recomputes single-part ETag (MD5) + per-chunk CRC32C
+                  from rebuilt bytes, sets IsLatest by back-reference mtime
+                  (correct across a Suspended-null version), refuses to clobber a
+                  live manifest unless --force, --dry-run reports only,
+                  --bucket-id filters one bucket. PLAINTEXT-ONLY: a chunk whose
+                  back-reference SSEAlgo!="" → reported unrecoverable, NEVER
+                  written (wrapped DEK was in the lost meta). Lost metadata
+                  (Content-Type/user-meta/tags/ACL/storage-class) reported lost,
+                  not fabricated. SSE-algo STAMPING at PUT + the RADOS per-chunk
+                  size probe are SPLIT to US-004b — engine ships CI-green on
+                  memory via an injected fake scanner.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -212,11 +231,16 @@ always-on main module (not cephimpl) so the go-ceph side needs no rate dep.
 Every chunk written to the data tier carries a self-describing owner
 pointer so reconcile/rebuild can run from data alone. Payload shape +
 codec are always-on in `internal/data/backref.go`: `data.Backref{BucketID,
-Key, VersionID, ChunkIdx, Mtime}` ↔ `EncodeBackref`/`DecodeBackref` (compact
-versioned wire form, leading `BackrefSchemaV1` byte reserves room for a
-future refcount-aware multi-owner shape — content-addressed dedup ROADMAP
-P2). **Carries NO key material** (no plaintext, no wrapped DEK) — safe under
-SSE; rebuild-index reports SSE objects unrecoverable instead. **Mtime is
+Key, VersionID, ChunkIdx, Mtime, SSEAlgo}` ↔ `EncodeBackref`/`DecodeBackref`
+(compact versioned wire form, leading `BackrefSchemaV1` byte reserves room
+for a future refcount-aware multi-owner shape — content-addressed dedup
+ROADMAP P2). **Carries NO key material** (no plaintext, no wrapped DEK) —
+safe under SSE. `SSEAlgo` (US-004) is the encryption-algorithm LABEL only
+("AES256"/"aws:kms", empty for plaintext) so `rebuild-index` reports SSE
+objects unrecoverable instead of serving ciphertext; it is NOT key material.
+**Note (US-004 split):** the gateway + RADOS/S3 backends do NOT yet POPULATE
+`SSEAlgo` at PUT — the field + wire exist and the rebuild engine reads it, but
+write-side stamping is the trailing `US-004b`. **Mtime is
 REQUIRED** — version_id orders the chain but can't derive IsLatest when a
 suspended-null version (ts=0) coexists. The identity is threaded onto the
 data-plane ctx via `data.WithBackref`/`BackrefFromContext`; the gateway

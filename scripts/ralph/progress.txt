@@ -4,6 +4,14 @@ Cycle: ralph/metadata-data-reconcile
 ---
 
 ## Codebase Patterns
+- Operator one-shot tools (rewrap, rebuild-index) are `strata admin <name>`
+  SUBCOMMANDS (single-binary invariant), NOT new binaries. They connect
+  DIRECTLY to backends via `buildRewrapMetaStore(cfg,logger)` (meta) +
+  `buildBenchDataBackend(cfg,logger)` (data) — NOT the gateway HTTP client. The
+  admin package pulls darwin-incompatible deps (gosigar) so it cannot build on
+  local macOS; verify with `CGO_ENABLED=0 GOOS=linux GOWORK=off go build
+  ./cmd/strata/admin/`. Dispatch in run.go's top-level `rest[0]==` chain (for
+  no-subcommand verbs) + the usage banner.
 - RADOS data-plane primitives live in TWO places: always-on shared shape +
   sentinel in main module `internal/data/rados/` (no go-ceph, builds CGO-free),
   real librados impl in the separate `cephimpl/` Go module. Mirror `rados.New`:
@@ -297,4 +305,101 @@ Cycle: ralph/metadata-data-reconcile
     does not -> chunkProber() returns nil -> dangling job errors gracefully and
     quarantines NOTHING (never flag a healthy object on a probe you couldn't
     run). The real RADOS/S3 prober is the US-003b split.
+---
+
+## 2026-06-02 - US-004 strata admin rebuild-index (last-resort rebuild from data scan)
+- Implemented the manifest-index reconstruction ENGINE + the
+  `strata admin rebuild-index` CLI subcommand. When the meta backup is lost,
+  rebuild scans the data tier, groups chunks by their US-001 back-reference,
+  and writes reconstructed meta.Object rows so intact bytes are recoverable.
+- Files added:
+  - internal/rebuild/rebuild.go: Rebuilder engine. Config{Meta,Data,Scanner,
+    Force,DryRun,BucketFilter}. Run(ctx,scope): one Scanner.Scan pass builds an
+    in-memory group map keyed {BucketID,Key,VersionID}; per (bucket,key) sorts
+    versions by back-ref mtime ASC + marks IsLatest on the max-mtime RECOVERABLE
+    version; per version: SSEAlgo!="" -> StatusUnrecoverableSSE (never written);
+    gap in chunk_idx 0..n-1 -> StatusGapped (never stitched short); else read
+    each chunk via 1-chunk-manifest GetChunks -> recompute MD5 ETag + per-chunk
+    CRC32C -> GetObject existence probe (skip unless Force) -> PutObject(versioned=
+    true; NullVersionID -> IsNull). Per-object ObjectReport + Stats counters.
+  - internal/rebuild/rebuild_test.go: red/green on memory (fake reconcile.
+    ChunkScanner + memory data backend): versioned rebuild GET-able w/ correct
+    bytes+ETag+order + IsLatest=v2-by-mtime; gapped+SSE rejected (no row);
+    idempotent skip + --force overwrite; dry-run writes nothing; absent-backref
+    never rebuilt.
+  - cmd/strata/admin/rebuild_index.go: CLI subcommand (--cluster/--pool/
+    --namespace/--bucket-id/--force/--dry-run), wired to buildRewrapMetaStore +
+    buildBenchDataBackend + reconcile.RADOSScanner. run.go dispatch + usage.
+- Files changed:
+  - internal/data/backref.go: Backref + BackrefAttrs gained SSEAlgo (algo LABEL
+    only, no key material). Wire form extended: header now
+    schema|bucket(16)|mtime(8)|chunkIdx(4)|verLen(2)|sseLen(2) then ver|sse|key.
+    backrefHeaderLen 31->33. Encode/Decode updated. backref_test.go: SSE
+    round-trip case + assertion.
+  - CLAUDE.md (rebuild-index map entry + US-001 payload note), ROADMAP.md
+    (Known-latent US-004-split entry), scripts/ralph/prd.json (US-004 passes:true
+    + new US-004b trailing split).
+- Quality: gofmt clean; CGO_ENABLED=0 GOOS=linux GOWORK=off go build ./... OK
+  (full module typechecks on Linux); go vet ./internal/rebuild ./cmd/strata/admin
+  OK; rebuild + data + reconcile + data/s3 tests green. Admin pkg LOCAL build
+  blocked only by darwin gosigar (CI-Linux compiles — known macOS limitation).
+- **Learnings for future iterations:**
+  - rebuild REUSES reconcile.ChunkScanner / ScanScope / ScannedChunk (no fork) —
+    rebuild imports reconcile. The RADOSScanner is the shared data->{OID,backref}
+    seam for BOTH the reconcile worker and rebuild-index.
+  - SSE detection from data alone needs a flag IN the back-reference: the wrapped
+    DEK lives only in meta.Object.SSEKey, and you cannot tell ciphertext from
+    plaintext by the bytes. Added Backref.SSEAlgo (LABEL only). The rebuild engine
+    reads it; the WRITE-side stamping (gateway+cephimpl+s3) is US-004b. Until then
+    a real-RADOS SSE object looks plaintext — documented limitation.
+  - reconcile.RADOSScanner does NOT populate ScannedChunk.Size (US-000
+    EnumeratePool yields OID + backref xattr, not size). rebuild needs per-chunk
+    size to read bytes. A real RADOS rebuild therefore needs a per-OID stat probe
+    (mirrors the US-003b ChunkStater) — split to US-004b. The memory red/green
+    feeds Size via the fake scanner (captured from the real PutChunks manifest).
+  - IsLatest across a suspended-null version: don't trust version_id order. Sort
+    a key's versions by back-ref mtime; write ASCENDING so the memory backend's
+    insertion-order head (GetObject "" returns versions[0], a prepend) lands on
+    the latest. Set the IsLatest field explicitly too so ordered backends agree.
+  - The admin CLI cannot build on local macOS (darwin gosigar transitive dep in
+    the admin package) — cross-compile to verify: CGO_ENABLED=0 GOOS=linux
+    GOWORK=off go build ./cmd/strata/admin/. Same CI-is-truth pattern as cephimpl.
+  - rebuild reads chunk bytes CHUNK-BY-CHUNK (1-chunk manifest per GetChunks)
+    rather than one flat GetChunks over the object, so each chunk's CRC32C can be
+    recomputed for the rebuilt ChunkRef (the original CRC was lost with meta).
+---
+
+## 2026-06-02 - US-004 review pass (review-strata correctness+tests)
+- Ran strata-correctness-reviewer (foreground) + strata-test-reviewer (bg).
+  Correctness: NO blocking. Two suggestions addressed:
+  (1) full-meta-loss => bucket row gone => every PutObject ErrBucketNotFound;
+      added a per-bucket pre-flight in Run (GetObject(bid,"","") distinguishes
+      ErrBucketNotFound vs ErrObjectNotFound), one WARN per missing bucket +
+      an actionable StatusError per version ("recreate the bucket first — its
+      owner/ACL/versioning/shard-count are NOT in the back-reference"). rebuild
+      NEVER fabricates a bucket (would invent metadata). New test
+      TestRebuildMissingBucketReportsActionableError.
+  (2) corrected the IsLatest comment — mtime-IsLatest is honoured verbatim only
+      on backends storing the field (memory via insertion-order head); TiKV/
+      Cassandra re-derive latest by version_id clustering, so a suspended-null
+      with a later mtime won't win there — minting a synthetic version_id would
+      break the "rebuilt version_id == back-ref" reconcile-healthy invariant, so
+      that narrow case is the US-004b RADOS-integration follow-up.
+  Tests: two sev-7 gaps closed + 2 suggestions:
+  - added explicit latest.IsLatest==true assertion (was proven only by memory
+    insertion-order side-effect);
+  - TestRebuildLatestFallsBackWhenNewestUnrecoverable (the latestIdx skip branch:
+    newest version SSE/gapped => older recoverable inherits the served head);
+  - TestRebuildSuspendedNullIsLatestByMtime (PRD headline: null version with
+    later mtime served latest, IsNull path);
+  - TestRebuildBucketFilterScopesToOneBucket (--bucket-id: 2 buckets in scan,
+    only the filtered one rebuilt; out-of-scope chunk not counted AbsentBackref);
+  - backref malformed table: sseLen-overrun row (verLen=0,sseLen=0xFFFF) so the
+    new bounds term is independently guarded;
+  - force test now seeds DIFFERENT bytes for the same {bucket,key,version} and
+    asserts the new ETag+bytes landed (proves overwrite content, not just branch).
+  Skipped (with rationale): a CLI unit test for rebuild-index — the admin pkg is
+  darwin-unbuildable (gosigar) and the cmd connects to real backends via
+  config.Load; sibling rewrap unit-tests only reorderProvider, same precedent.
+- 9 rebuild tests green; full Linux build green.
 ---
