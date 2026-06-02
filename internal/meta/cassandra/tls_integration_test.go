@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,7 +83,7 @@ func TestCassandraTLSHandshake(t *testing.T) {
 	}
 
 	t.Run("valid_ca_succeeds", func(t *testing.T) {
-		store, err := cassandra.Open(cassandra.SessionConfig{
+		store := openCassandraWithRetry(t, cassandra.SessionConfig{
 			Hosts:       []string{host},
 			Keyspace:    "strata_tls_valid",
 			LocalDC:     "datacenter1",
@@ -90,9 +91,6 @@ func TestCassandraTLSHandshake(t *testing.T) {
 			Timeout:     60 * time.Second,
 			TLS:         cassandra.TLSConfig{CAFile: validCAPath},
 		}, cassandra.Options{DefaultShardCount: 8})
-		if err != nil {
-			t.Fatalf("open with valid CA: %v", err)
-		}
 		t.Cleanup(func() { _ = store.Close() })
 
 		if err := store.Probe(ctx); err != nil {
@@ -118,7 +116,7 @@ func TestCassandraTLSHandshake(t *testing.T) {
 	})
 
 	t.Run("skip_verify_succeeds", func(t *testing.T) {
-		store, err := cassandra.Open(cassandra.SessionConfig{
+		store := openCassandraWithRetry(t, cassandra.SessionConfig{
 			Hosts:       []string{host},
 			Keyspace:    "strata_tls_skip",
 			LocalDC:     "datacenter1",
@@ -126,15 +124,57 @@ func TestCassandraTLSHandshake(t *testing.T) {
 			Timeout:     60 * time.Second,
 			TLS:         cassandra.TLSConfig{SkipVerify: true},
 		}, cassandra.Options{DefaultShardCount: 8})
-		if err != nil {
-			t.Fatalf("open with skip_verify: %v", err)
-		}
 		t.Cleanup(func() { _ = store.Close() })
 
 		if err := store.Probe(ctx); err != nil {
 			t.Fatalf("probe: %v", err)
 		}
 	})
+}
+
+// openCassandraWithRetry tolerates the TLS container's warmup race on the
+// success-expecting subtests. extractServerCA already proved the SSL port is
+// up, but gocql's control-connection handshake can still transiently fail with
+// "no connections were made when creating the session" when it races a JVM GC
+// pause on the CI-tuned heap (US-010) — observed flaking valid_ca_succeeds on
+// the Cassandra gate. The condition under test is the TLS HANDSHAKE outcome,
+// not container readiness, so retry ONLY a transient dial failure; a genuine
+// cert/handshake rejection is non-transient and fails fast (and the wrong_ca
+// subtest, which asserts failure, does not use this helper).
+func openCassandraWithRetry(t *testing.T, cfg cassandra.SessionConfig, opts cassandra.Options) *cassandra.Store {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for attempt := 1; ; attempt++ {
+		store, err := cassandra.Open(cfg, opts)
+		if err == nil {
+			return store
+		}
+		if !isTransientCassandraConnErr(err) || time.Now().After(deadline) {
+			t.Fatalf("open (attempt %d): %v", attempt, err)
+		}
+		t.Logf("transient cassandra TLS connect (attempt %d), retrying: %v", attempt, err)
+		time.Sleep(2 * time.Second)
+	}
+}
+
+// isTransientCassandraConnErr reports whether err is a gocql session-creation
+// failure caused by the host being momentarily unreachable (container warmup /
+// GC pause) rather than a deterministic TLS/cert rejection.
+func isTransientCassandraConnErr(err error) bool {
+	s := err.Error()
+	for _, m := range []string{
+		"no connections were made",
+		"unable to dial",
+		"no hosts available",
+		"i/o timeout",
+		"connection refused",
+		"EOF",
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractServerCA dials the cassandra SSL port with InsecureSkipVerify=true,
