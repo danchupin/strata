@@ -1,211 +1,145 @@
 {
   "project": "Strata",
-  "branchName": "ralph/architecture-hardening",
-  "description": "Pre-production architecture hardening. A senior-architect critical review found Strata mostly production-ready (s3-tests 92.7%, QA GO) but with one load-bearing claim the code does not back - per-bucket object sharding + online reshard are advertised as the Cassandra-side answer to RGW's bucket-index ceiling, yet the Cassandra hot path ignores bucket.ShardCount (uses the process-global s.defaultShard at all 9 shardOf call sites) and internal/reshard/runJob is a skeleton that counts rows but never moves them. This cycle makes the claim true: real per-bucket sharding on Cassandra, a genuine online reshard that rewrites rows with a target-only-write + union-read + cleanup-before-flip transitional model, and TiKV+Cassandra parity (Cassandra contract back on a green required CI check). It also closes three accepted QA-cycle P2 residual risks: DeleteObjects direct test (R1), object-access policy-UNION-ACL semantics (R6), and a per-chunk CRC32C verified on the read path to fail loud on plaintext byte-flip (R9). Every behavioural fix ships with red->green proof. Resolved decisions: CRC32C on-by-default (STRATA_CHUNK_CRC_VERIFY); TiKV/memory reshard = immediate-complete no-op job (API success, UI disabled); target-only writes + union-read + post-flip cleanup; reshard console UI in-cycle; Cassandra contract via dedicated nightly job this cycle with per-PR-runner starvation root-cause as a tracked must-fix. Backends in scope: TiKV + memory (canonical per-PR CI), Cassandra (integration, dedicated job), RADOS/ceph + MinIO under integration tags. CI on Linux is the source of truth; many failure modes do not reproduce on a local macOS/lima box. If a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt. Source PRD at tasks/prd-architecture-hardening.md.",
+  "branchName": "ralph/metadata-data-reconcile",
+  "description": "Metadata ↔ data reconcile & index rebuild. Strata splits the S3-key→chunk map (meta: TiKV/Cassandra) from the chunk bytes (data: RADOS) — the scale advantage, but it drops the safety net RGW gets by colocating its index with the data. Today a RADOS chunk is an opaque random-OID blob with NO back-reference to its owning object, so the map is one-directional (meta→data): a restore skew silently leaks orphan chunks (GC walks meta→data, can't see them) or leaves dangling manifests (GET→5xx), and a lost meta backup means the intact bytes are permanently unreadable. This cycle makes every chunk self-describing (a back-reference xattr to its owner), ships a reconcile worker that repairs RADOS↔meta divergence after a restore (orphan chunks, dangling manifests), and a last-resort `strata admin rebuild-index` that reconstructs the manifest index from a data-tier scan. TiKV + Cassandra parity throughout. RESOLVED DECISIONS (post critical-review vs live code): (1) orphan default policy = report (never auto-delete; gc/restore explicit per-run); (2) back-reference payload = {schema_byte, bucket_id, key, version_id, chunk_idx, mtime} — mtime REQUIRED because version_id orders the chain but can't derive IsLatest when a suspended-null version coexists (the exact ListObjectVersions bug fixed in ralph/architecture-hardening); (3) rebuild-index is PLAINTEXT-ONLY — the wrapped DEK lives only in meta.Object.SSEKey, so a lost meta makes SSE ciphertext undecryptable; SSE objects are flagged unrecoverable, the back-reference carries NO key material (preserves the meta/data security separation); (4) S3-passthrough backend gets a back-reference too (object tags/metadata; reconciles via its native ListObjects, no pool-enumeration dependency); (5) reconcile = leader-elected worker draining admin-queued jobs (reuse the reshard US-005 pattern), rebuild = strata admin CLI one-shot (single-binary invariant). KNOWN INTERACTIONS: content-addressed dedup (ROADMAP P2) makes 1 chunk → N owners and is incompatible with a single-owner back-reference — the schema_byte reserves room for a future refcount-aware shape (CopyObject today re-writes chunks to fresh OIDs, so no multi-owner chunk exists yet). US-009 per-chunk CRC32C already SHIPPED in ralph/architecture-hardening (ChunkRef carries Checksum) — the CRC proves bytes are intact, this cycle's back-reference proves whose chunk it is. CI on Linux is the source of truth; Cassandra/RADOS failure modes do not reproduce on a local macOS/lima box. If a story cannot land in one Ralph iteration, split it into US-00N + a trailing story and record the split in progress.txt. Source PRD at tasks/prd-metadata-data-reconcile.md.",
   "userStories": [
     {
-      "id": "US-001",
-      "title": "Cassandra hot path resolves per-bucket shard count",
-      "description": "As an operator who created a bucket with a non-default STRATA_BUCKET_SHARDS, I want reads and writes to that bucket to use its shard count, so the per-bucket sharding the docs promise actually takes effect.",
+      "id": "US-000",
+      "title": "RADOS pool object-enumeration primitive (foundation)",
+      "description": "As the reconcile/rebuild tooling, I need to enumerate every object in a RADOS pool, because orphan detection (a chunk the meta tier does not know about) and last-resort rebuild are ONLY possible by walking the pool itself — and there is no such primitive today (cephimpl exposes only GetPoolStats; the rebalance worker walks META via ListBucketsShard/ListObjects, never the pool).",
       "acceptanceCriteria": [
-        "ALL nine shardOf(key, s.defaultShard) call sites in internal/meta/cassandra/store.go resolve the bucket's ShardCount instead of the global: PutObject:463, GetObject:587, DeleteObject:752, SetObjectReplicationStatus:1887, resolveVersionID:2408 (CRITICAL - resolves ?versionId; missing it 404s every versioned point-read on a non-default bucket), UpdateObjectSSEWrap:4118, and the two further object-mutation sites at :4167 and :4198",
-        "The three list/scan sites shardCount := s.defaultShard (ListObjects:820, ListObjectVersions:919) and the helpers bucketIsEmpty:357 / loop :1042 / SampleBucketShardStats:1142 likewise resolve the bucket's ShardCount",
-        "A grep assertion in review confirms no remaining s.defaultShard on any object-addressing path (missing any one site reintroduces the 404 bug)",
-        "A shard-count resolver cache keyed on bucketID with a short TTL avoids a buckets round-trip on every object op; cache miss falls back to a read; the cache carries BOTH ShardCount (active) and TargetShardCount so in-flight writers route without a second lookup; CompleteReshard invalidates the entry synchronously",
-        "Steady-state only (no in-flight reshard transition in this story): a bucket created with shard_count=128 round-trips PUT->GET->LIST->DELETE correctly; a bucket with shard_count=16 likewise; both differ from the process default",
-        "TiKV + memory backends unchanged (TiKV is range-scan, shard-agnostic)",
-        "New contract case in internal/meta/storetest proves non-default per-bucket shard count round-trips (memory always-on; Cassandra leg under -tags integration)",
-        "make vet passes",
+        "cephimpl wraps go-ceph ioctx.Iter() (rados_nobjects_list) behind a small interface exposed on the main-module internal/data/rados shape: streams object IDs in a pool, resumable from a cursor/watermark, context-cancellable",
+        "Rate-limited via a token bucket (reuse the rebalance-style knob) so a live-cluster pool walk does not saturate OSDs",
+        "Filters to Strata chunk OIDs (skips foreign objects) and is namespace-aware for multi-cluster / per-class pools",
+        "Surfaced through the always-on rados package as a data.ErrRADOSNotCompiled-style sentinel off the ceph tag (mirrors rados.New), so the main module builds without librados (GOWORK=off go mod graph | grep -c go-ceph stays 0)",
+        "Red/green proof: seed N chunks into a test pool, enumerate -> exactly N OIDs; resume from a mid-walk cursor -> no dup, no drop",
+        "make vet passes; RADOS leg under ceph/integration (make test-rados); main-module build stays go-ceph-free",
         "Tests pass"
       ],
       "priority": 1,
-      "passes": true,
-      "notes": "All 12 object-addressing sites in cassandra/store.go now resolve the bucket's ShardCount via bucketShardCounts (short-TTL cache, carries active+target, invalidated synchronously by StartReshard/CompleteReshard). shardForKey helper replaces shardOf(key,s.defaultShard) at the 9 mutation/point-read sites; the 3 list/scan sites + AllObjectVersions + SampleBucketShardStats fallback + bucketIsEmpty resolve active count. grep confirms no s.defaultShard on object-addressing paths (remaining uses: comments, CreateBucket INSERT, legacy<=0 guards). Generic contract case caseNonDefaultShardRoundTrip (memory+tikv+cassandra). Discriminating red/green proof: integration TestCassandraPerBucketShardResolution — two stores over same keyspace, writer default=128/16, reader default=64, reader must resolve stored count or 404. make vet + memory suite green locally; cassandra+tikv legs under integration/containers (CI). Verified locally CGO_ENABLED=0 on darwin (cgo blocked per progress patterns)."
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "US-002",
-      "title": "Reshard transitional read/write model (meta contract)",
-      "description": "As the system, while a reshard job is in flight I must serve a stable key set - every key visible before the job started stays visible throughout - so clients see no gaps or duplicates during a resize.",
+      "id": "US-001",
+      "title": "Chunk back-reference stamped at PUT (RADOS + S3 backend)",
+      "description": "As the system, I want every chunk written to the data tier to carry a durable back-reference to its owning object so the data tier is self-describing and a reconcile/rebuild can run from data alone.",
       "acceptanceCriteria": [
-        "Transitional contract defined: while shard_count_target != 0, writes land in the target layout (fnv%target) and reads return the deduplicated union of source (fnv%active) and target partitions, target row wins on (key, version_id) collision",
-        "GetObject point lookups during a job probe both the source-shard and target-shard partition for the key and return the newest by version",
-        "ListObjects/ListObjectVersions during a job merge source-union-target with dedup so a half-migrated key is never double-emitted and never missing",
-        "A storetest contract case seeds a bucket, flips it into the in-flight state with rows split across both layouts, and asserts the listed/point-read key set equals the pre-flip set exactly",
-        "Power-of-two doubling invariant documented in code: target = 2*active, each old shard s maps to s or s+active; no three-way splits (meta.IsValidShardCount enforces power-of-two)",
-        "Memory backend (shard-agnostic flat map) returns the same key set - transitional model is a no-op but the contract test still passes",
-        "make vet passes",
+        "RADOS PutChunks stamps an xattr (user.strata.backref) carrying {schema_byte, bucket_id, key, version_id, chunk_idx, mtime} on each chunk, written in the SAME WriteOp as the chunk body via the existing writeChunkBatched SetXattr seam (one Operate, no extra round-trip)",
+        "mtime is REQUIRED (not optional): version_id orders the version chain but cannot derive IsLatest when a suspended-null version (ts=0) coexists — rebuild needs mtime to set IsLatest correctly",
+        "Payload is a compact versioned encoding; the leading schema_byte reserves room for a future refcount-aware / multi-owner shape (content-addressed dedup interaction); documented in code; carries NO key material (safe under SSE-S3/KMS — no plaintext, no wrapped DEK)",
+        "S3-passthrough backend leg: the S3 backend stamps the same back-reference as object tags / user-metadata on the backing object",
+        "Multipart and multi-cluster chunks covered (rides the existing per-chunk ioctx resolution)",
+        "Hot-path cost measured: a benchmark shows SetXattr-in-WriteOp adds negligible p99 vs bare WriteFull; numbers recorded in a bench doc",
+        "On by default with env opt-out STRATA_CHUNK_BACKREF (default on); off -> legacy no-xattr behaviour, reconcile/rebuild degrade gracefully and log that back-references are absent",
+        "make vet passes; memory backend no-ops; RADOS leg under ceph/integration; S3-backend leg under the s3 backend test seam",
         "Tests pass"
       ],
       "priority": 2,
-      "passes": true,
-      "notes": "Cassandra transitional read/write: target-layout writes, union source+target reads (target wins collision), clear-both-shards overwrite/delete, widened LIST fan-out + cross-shard delete-marker suppression. Memory/TiKV no-op. Proof: caseReshardTransitionalKeySet + integration TestCassandraReshardTransitional + TestCassandraReshardDeleteMarkerNoResurrect."
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "US-003",
-      "title": "Reshard worker actually rewrites rows + cleanup",
-      "description": "As an operator resizing a hot bucket's shards, I want the reshard worker to physically move each row to its new partition and then flip the active shard count, so post-flip point-GET addresses the right partition.",
+      "id": "US-002",
+      "title": "Reconcile worker — orphan chunk detection + policy",
+      "description": "As an operator who just restored from backup, I want a pass that finds data-tier chunks with no matching manifest and resolves them by an explicit policy, so a restore skew does not leak storage forever.",
       "acceptanceCriteria": [
-        "internal/reshard/reshard.go::runJob is rewritten: for each source partition scan rows; for every row whose fnv%target != fnv%active, copy it to the target partition (INSERT under the new layout); persist the LastKey watermark per batch for crash-resume",
-        "Ordering is cleanup-BEFORE-flip: while the job is in-flight (target != 0) union-read is active, so the worker first deletes each moved source-partition orphan, THEN CompleteReshard LWT-flips active = target and clears shard_count_target - flipping first would let post-flip listing double-emit the moved key",
-        "Cleanup is idempotent and crash-safe (re-running after a partial cleanup converges; no row deleted that the target does not already hold)",
-        "The flip itself is LWT (IF EXISTS) per the codebase LWT-on-LWT rule, or a quorum read can observe a stale shard_count; do not overclaim atomicity - move+flip is NOT one atomic op, only the flip is atomic",
-        "Red/green proof: seed a bucket with N keys at shard_count=64, run a 64->128 reshard to completion, then assert every key is reachable via point-GET (today keys whose new shard >= 64 would 404) and ListObjectVersions emits each key exactly once; capture the test failing against the skeleton, passing after",
-        "Versioned keys: every version of a key moves together; latest-version ordering preserved post-flip",
-        "make vet passes (Cassandra leg under -tags integration)",
+        "A reconcile pass enumerates data-tier chunks (RADOS via the US-000 primitive per cluster/pool; S3 backend via its native ListObjects), reads each back-reference, and looks up the manifest in the meta store (TiKV + Cassandra parity)",
+        "Orphan chunk (chunk present, no manifest references it) resolved by a per-run policy: report (DEFAULT — never auto-delete), gc (enqueue for deletion — object was rolled back), or restore (rebuild the manifest row from the back-reference, for meta-older-than-data)",
+        "Execution model: leader-elected worker that DRAINS admin-queued jobs (reuse the reshard worker + admin-queue pattern — POST queues a job -> 202, worker runs out-of-band, GET reads progress); registered in registeredWorkerNames; per-iteration metrics.ObserveWorkerTick + StartIteration/EndIteration",
+        "Idempotent and resumable via a per cluster/pool watermark; a re-run after a partial pass converges",
+        "Rate-limited (token bucket, reuse the rebalance knob) so a reconcile on a live cluster does not saturate OSDs",
+        "Metrics: strata_reconcile_chunks_scanned_total, strata_reconcile_orphans_found_total{resolution}, strata_reconcile_errors_total",
+        "Red/green proof: seed a bucket, simulate restore skew (delete manifest rows, keep chunks); reconcile in gc mode -> chunks enqueued for deletion; restore mode -> manifest rebuilt and the object is GET-able again; report mode -> nothing deleted",
+        "make vet passes; memory + TiKV storetest contract; RADOS under integration",
         "Tests pass"
       ],
       "priority": 3,
-      "passes": true,
-      "notes": "Cassandra implements optional meta.ReshardMigrator (MigrateReshardKey): relocates every version row of a key src-shard→dst-shard via INSERT … IF NOT EXISTS (MapScanCAS; never clobbers a newer concurrent target write) then deletes the source orphan — idempotent + crash-safe. New helpers scanAllVersionsAtShard + insertObjectRowAtShard (full-column copy, mirrors PutObject INSERT exactly, NO bucket_stats bump) + objectSelectCols const (scanObjectLimit1/scanObjectByVersion refactored onto it). internal/reshard/runJob rewritten: walks the in-flight union ListObjectVersions key-by-key, drives MigrateReshardKey per distinct key (dedup via lastMigrated) under a LastKey watermark with a forward-progress guard (inclusive marker + over-large-key), accumulates moved rows; RunOnce flips via LWT CompleteReshard ONLY after the walk drains (cleanup-before-flip). Memory/TiKV don't implement the interface → immediate-complete no-op (0 moved). Red/green proof: integration TestCassandraReshardWorkerMovesRows (64→128, 300 unversioned + one 3-version key; post-flip every key point-GETs, LIST emits each once, all 3 versions reachable in order — RED against the row-walking skeleton that 404s the diverging half). Worker unit tests use a recordingStore meta.ReshardMigrator fake (dedup-per-key + watermark resume stay meaningful + green on memory). strata-correctness-reviewer: no blocking issues, all 5 verifications pass. Narrow known race (concurrent specific-version DELETE vs copy window) named in code + ROADMAP P2. make vet + reshard/memory/s3api suites green locally CGO_ENABLED=0; cassandra leg integration/CI."
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "US-004",
-      "title": "Reshard semantics on TiKV + memory (immediate-complete no-op)",
-      "description": "As a developer, I want StartReshard/CompleteReshard to have defined, tested behaviour on every backend so the admin surface is backend-safe.",
+      "id": "US-003",
+      "title": "Reconcile worker — dangling manifest detection",
+      "description": "As an operator, I want the pass to find manifests that point at chunks the data tier no longer has, so I learn which objects a restore left broken instead of discovering it on a client 5xx.",
       "acceptanceCriteria": [
-        "TiKV internal/meta/tikv/reshard.go::StartReshard today runs a REAL pessimistic-txn reshard flow (locks the bucket key, validates target > ShardCount, queues a job) - rework it to an immediate-complete no-op: StartReshard returns a job that RunOnce completes at once with zero rows moved (TiKV is range-scan, nothing to move); the old job-queueing path is removed/short-circuited",
-        "Memory backend internal/meta/memory/store.go:2898 StartReshard (already implemented) gets the same immediate-complete no-op semantics; shard-agnostic flat map keeps the key set intact before/during/after",
-        "meta.IsValidShardCount (power-of-two, n&(n-1)==0 at store.go:1429) still gates the target on all backends so an invalid target is rejected even where reshard is a no-op",
-        "Contract case asserts the no-op semantics on TiKV + memory: a reshard request leaves the full key set readable before, during, and after; a direct API/CLI caller gets success, not an error",
-        "docs/site/content/architecture/sharding.md updated: reshard applies to the Cassandra fan-out backend; TiKV needs no resharding (range scan)",
-        "make vet passes",
+        "The reconcile pass walks manifests (meta -> data direction) and probes that each referenced chunk exists in the data tier",
+        "Dangling manifest (manifest present, chunk missing) is reported and, by policy, either quarantined (marked unreadable with a clear error) or deleted — NEVER silently left to surface as a corrupt GET",
+        "A summary report (per bucket: N orphans, N dangling, N healthy) is written to a report object / log, suitable for an operator go/no-go after restore",
+        "Metric strata_reconcile_dangling_manifests_total{resolution}",
+        "Red/green proof: seed objects, delete a chunk under one manifest, run reconcile -> that object reported dangling and quarantined; a healthy object untouched",
+        "make vet passes; memory + TiKV storetest contract; RADOS under integration",
         "Tests pass"
       ],
       "priority": 4,
-      "passes": true,
-      "notes": "Immediate-complete no-op realized in worker runJob: short-circuits (no walk, no watermark) when backend has no meta.ReshardMigrator (memory/TiKV). StartReshard queueing kept intentionally — decision #4 requires a job for RunOnce to complete, and the shared caseOnlineReshard contract (green on all backends) asserts target-stamp + ErrReshardInProgress + flip. Red/green proven (6->0 ListObjectVersions calls)."
+      "passes": false,
+      "notes": ""
     },
     {
-      "id": "US-005",
-      "title": "Online-reshard admin endpoint (async) + concurrent-write smoke",
-      "description": "As an operator, I want to trigger a reshard and have it complete correctly while clients keep writing, proving the transitional model under load.",
+      "id": "US-004",
+      "title": "strata admin rebuild-index — last-resort rebuild from data scan (plaintext-only)",
+      "description": "As an operator who lost the metadata backup, I want to reconstruct the manifest index for a bucket from the surviving data-tier chunks so the intact bytes are not permanently lost.",
       "acceptanceCriteria": [
-        "Existing endpoint reworked not built fresh: adminBucketReshard (internal/s3api/admin.go:343) today drives the reshard synchronously inline (worker.RunOnce in the request goroutine) - wrong once US-003 moves real data (a 64->128 reshard of a large bucket would block the HTTP request for minutes/hours); split into a trigger (queue the job + return a job id immediately) + a separate progress read (job watermark / % complete / state)",
-        "Async drive: reshard is NOT a registered tick-worker today (absent from cmd/strata/workers/; there is no --workers=reshard path - do not assume one); either (a recommended) register a real leader-elected reshard background worker that picks up queued jobs and update the CLAUDE.md note, or (b) run RunOnce in a server-managed goroutine keyed off the job row",
-        "admin: audit stamp on the trigger (endpoint currently has no audit override - add it per the CLAUDE.md 'every new admin write' rule)",
-        "GetReshardJob (already on meta.Store) backs the progress read on all backends",
-        "Smoke harness scripts/smoke-reshard.sh + make smoke-reshard against the Cassandra profile: seed a bucket, kick a 64->128 reshard, drive concurrent PUT/GET/DELETE throughout, assert (a) no client sees a 5xx or spurious 404 during the job, (b) the key set is identical before and after, (c) post-flip point-GET hits the new layout",
-        "Crash-resume leg: kill the worker mid-job, restart, confirm it resumes from the watermark and still converges to a correct key set",
-        "make vet passes; smoke documented in the operator runbook",
+        "New strata admin rebuild-index subcommand (single-binary invariant — NOT a new binary, under cmd/strata/admin) that scans a cluster/pool (US-000 primitive), groups chunks by back-reference {bucket_id, key, version_id}, orders by chunk_idx, and writes reconstructed manifest rows into the meta store (TiKV + Cassandra)",
+        "Handles versioned objects (every version reconstructed; IsLatest correct across a suspended-null version using the back-reference mtime) and multipart-origin chunks",
+        "Idempotent + resumable; a re-run does not duplicate or corrupt rows already rebuilt",
+        "Refuses to overwrite a manifest that already exists in meta unless --force (live meta wins by default; rebuild is for the empty/lost case)",
+        "Gaps (missing chunk_idx in the sequence) reported, not silently stitched into a short object — a partial object is flagged, not served as whole",
+        "PLAINTEXT-ONLY: SSE-S3/KMS objects reported unrecoverable (wrapped DEK was in the lost meta) and NEVER silently served; object metadata absent from the back-reference (Content-Type, user-metadata, tags, ACL, storage-class, multipart-composite ETag) reported as lost, not fabricated; single-part ETag recomputed from rebuilt bytes",
+        "Red/green proof: seed a NON-SSE bucket, wipe its manifest rows entirely, run rebuild-index -> every object GET-able again with correct bytes + size + version order (IsLatest correct across a suspended-null version); a removed middle chunk -> object flagged gapped, not truncated; an SSE object -> reported unrecoverable, not served",
+        "make vet passes; TiKV + Cassandra meta targets; RADOS integration",
         "Tests pass"
       ],
       "priority": 5,
-      "passes": true,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Shared-responsibility ops note + reconcile runbook",
+      "description": "As an operator, I want a clear statement of who owns what and how to run reconcile/rebuild after a restore, so I can make a safe go/no-go.",
+      "acceptanceCriteria": [
+        "An operator doc states the boundary: operator owns TiKV/Cassandra and RADOS backup/restore; Strata owns the back-reference + reconcile/rebuild that realigns the two tiers after a restore (Strata does NOT reimplement br / nodetool)",
+        "A runbook section: post-restore procedure (run reconcile in report mode -> review summary -> choose gc/restore policy -> run rebuild-index only if the meta backup is unusable), with exact commands and what each metric means",
+        "States the rebuild-index recovery boundary LOUDLY: plaintext objects recover fully; SSE-S3/KMS objects are unrecoverable from data alone (wrapped DEK was in the lost meta); object metadata not in the back-reference is lost; the meta backup is the primary recovery path, rebuild-index is the last resort for plaintext bytes only",
+        "Cross-links the design prior art (Lustre LFSCK / HDFS fsck) so operators recognise the pattern",
+        "Docs build clean (make docs-build)"
+      ],
+      "priority": 6,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-006",
-      "title": "Reshard progress in the web console",
-      "description": "As an operator, I want to start and watch a reshard from the console - mirroring the existing drain-progress UX - so the feature is not server-only.",
+      "title": "Reconcile / rebuild surfaced in the web console",
+      "description": "As an operator, I want to trigger and watch a reconcile from the console (mirroring the drain/reshard-progress UX) rather than only via CLI.",
       "acceptanceCriteria": [
-        "Bucket detail surfaces shard count + a Reshard action (target = next power-of-two, typed-confirm) when the backend supports it; on TiKV the button is disabled with an explanatory tooltip 'range-scan backend needs no resharding' (API = no-op success, UI = disabled, both consistent)",
-        "A progress indicator reads the US-005 progress endpoint (state + % complete + ETA) reusing the DrainProgressBar-style component pattern",
-        "Playwright spec covers: trigger -> in-progress -> complete, plus the TiKV-disabled state",
-        "Typecheck/lint passes",
+        "An admin page / panel triggers a reconcile run (policy picker: report / gc / restore) and shows progress (scanned / orphans / dangling / % complete) reusing the DrainProgressBar / reshard-progress component pattern",
+        "The post-run summary report is viewable in the console",
+        "rebuild-index is intentionally CLI-ONLY (a destructive last-resort op gated behind shell access) — the console links to the runbook instead of exposing a one-click rebuild; documented as a deliberate choice",
+        "Playwright spec covers trigger -> progress -> summary",
+        "Typecheck passes",
         "Verify in browser using dev-browser skill"
       ],
-      "priority": 6,
-      "passes": true,
+      "priority": 7,
+      "passes": false,
       "notes": ""
     },
     {
       "id": "US-007",
-      "title": "Direct test matrix for DeleteObjects (closes R1)",
-      "description": "As a maintainer, I want the multi-object delete handler directly tested so its batch/partial-failure/versioned semantics are pinned, not just exercised incidentally by the race workload.",
+      "title": "End-to-end reconcile/rebuild validation walkthrough",
+      "description": "As the team, I want a single end-to-end exercise that proves the whole feature works together against the real backends, so the cycle is validated server-to-UI before close.",
       "acceptanceCriteria": [
-        "Table-driven handler test over newHarness covering: quiet vs verbose mode, mixed success + NoSuchKey rows, the 1000-key cap (1001 -> error), malformed <Delete> body, and the <DeleteResult>/per-key <Error> wire shape",
-        "Versioned-bucket leg: unversioned-style delete creates a delete marker; explicit ?versionId removes a specific version; both reflected in the response rows",
-        "Tests fail against any deliberately-broken assertion (sanity), pass on main",
-        "ROADMAP R1 entry close-flipped with the commit sha",
-        "make vet passes",
-        "Tests pass"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-008",
-      "title": "Object-access policy UNION ACL semantics (closes R6)",
-      "description": "As an S3 client, I want a bucket policy granting me s3:GetObject to actually grant access even when the object ACL is private - matching AWS, where policy and ACL are a union, not an intersection.",
-      "acceptanceCriteria": [
-        "requireObjectAccess (internal/s3api/access.go:104) is changed from policy-INTERSECT-ACL to policy-UNION-ACL: an explicit policy Allow grants access regardless of the ACL gate (and vice-versa), while an explicit policy Deny still wins (AWS precedence: explicit deny > allow)",
-        "PublicAccessBlock interaction preserved: RestrictPublicBuckets / IgnorePublicAcls still suppress the respective public grant (QA-cycle US-005 PAB tests must not regress)",
-        "Red/green proof: a test where an anonymous/non-owner GET is allowed by bucket policy but denied by a private ACL now returns 200 (was 403); TestPAB_* and the existing policy/ACL gate matrices stay green",
-        "Fixture rework: existing TestPolicyGate_* pass today only because the in-memory harness owner-matches the anonymous identity - flip to a genuine non-owner anon principal exercising the union; the owner-full-control path and the explicit-Deny-wins precedence each get a direct case (security-sensitive widening - prove it does not grant beyond AWS)",
-        "ROADMAP R6 entry close-flipped with the commit sha",
-        "make vet passes",
+        "A documented walkthrough (script or runbook) seeds a bucket, simulates BOTH skew directions (meta-older-than-data and data-older-than-meta), runs reconcile report -> gc/restore, and verifies no silent leak and no silent corrupt GET — neither possible before this cycle",
+        "Wipes a non-SSE bucket's manifest rows and runs rebuild-index -> full recovery with correct bytes/size/version order, gaps flagged, SSE objects reported unrecoverable",
+        "Exercises the web console trigger -> progress -> summary path end-to-end (the UI is not a no-op stub)",
+        "Runs against both TiKV and Cassandra meta backends to prove parity",
+        "make vet + smoke pass; RADOS legs under integration; result recorded in progress.txt",
         "Tests pass"
       ],
       "priority": 8,
-      "passes": true,
+      "passes": false,
       "notes": ""
-    },
-    {
-      "id": "US-009",
-      "title": "Per-chunk CRC32C on the read path, fail-loud (closes R9)",
-      "description": "As a data-integrity-conscious operator, I want a flipped byte in a plaintext (non-SSE) chunk to fail the read loudly instead of returning a corrupted 200, so silent at-rest corruption is detectable.",
-      "acceptanceCriteria": [
-        "data.ChunkRef (internal/data/manifest.go:102, proto message ChunkRef internal/data/manifest.proto:54) carries a per-chunk CRC32C checksum, set on PutChunks, schema-additive: Go field + proto field 6 (fields 1-5 cluster/pool/namespace/oid/size are taken; 6 is next free) + JSON omitempty; legacy rows with no checksum decode to zero and skip verification (zero = absent, not CRC of zero bytes - guard the sentinel)",
-        "GetChunks verifies each chunk against its stored CRC32C and fails loud (data.ErrChecksumMismatch, surfaced as a 5xx / aborted stream - never a silent short or corrupted 200) on mismatch",
-        "Red/green proof: flip a byte in a stored plaintext chunk -> read fails loud (today it returns a corrupted 200); a clean chunk reads normally; SSE objects unaffected (AEAD already covers them)",
-        "Range-GET boundary handling: the CRC covers a whole 4 MiB chunk but a Range request reads first/last chunk partially - pick and implement one explicit behaviour: (a default) read the full boundary chunk to verify then slice, or (b) skip verification on the partial chunk and bump strata_chunk_crc_unverified_total{reason=range_boundary}; fully-covered interior chunks always verified; document + test it",
-        "Verification on by default with env opt-out STRATA_CHUNK_CRC_VERIFY (default on); hot-path cost measured/noted",
-        "ROADMAP R9 entry close-flipped with the commit sha",
-        "make vet passes (memory always-on; RADOS leg under ceph/integration if a backend hook is needed)",
-        "Tests pass"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": "Done. ChunkRef.Checksum CRC32C (proto f6), stamped at PutChunks (memory + RADOS coordinator), verified full-chunk on read (memReader + prefetch fetchSegment, option-a range boundary), ErrChecksumMismatch fail-loud, zero==absent legacy skip, STRATA_CHUNK_CRC_VERIFY default on. Red/green proof in corruption_test.go + prefetch_test.go."
-    },
-    {
-      "id": "US-012",
-      "title": "Cassandra ListObjects fan-out rebuilt for production",
-      "description": "As an operator running the Cassandra backend at scale, I want the listing fan-out to be bounded and consistent so concurrent listings don't exhaust goroutines/connections and reads have a defined consistency guarantee - not the silent cluster default.",
-      "acceptanceCriteria": [
-        "ListObjects/ListObjectVersions fan-out is bounded: today internal/meta/cassandra/store.go::ListObjects (~line 827) spawns shardCount goroutines per request with NO semaphore - at high per-bucket shard counts x concurrent list requests this explodes goroutines and the gocql connection pool; replace with a bounded worker pool (knob, sane default) so concurrency is capped regardless of shard count",
-        "Read consistency pinned explicitly (e.g. LOCAL_QUORUM) on the listing queries rather than relying on the cluster/session default - the listing read-consistency guarantee must not depend on an operator not having changed a Cassandra default",
-        "Memory budget bounded: the cursor/heap-merge holds at most boundedConcurrency x pageSize rows in flight, not shardCount x pageSize; documented",
-        "Pagination cookies still resume per-shard cursors correctly under the bounded pool (no page gap/dup when concurrency < shardCount)",
-        "Red/green proof: a test driving many concurrent ListObjects against a high-shard-count bucket asserts goroutine count stays bounded (no linear-in-shardCount blowup) and the listed key set is correct/stable; a consistency test asserts a write at LOCAL_QUORUM is visible to the very next list at LOCAL_QUORUM",
-        "TiKV unaffected (single ordered scan, no fan-out)",
-        "make vet passes (Cassandra leg under -tags integration)",
-        "Tests pass"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": "Bounded fan-out: new runBoundedFanOut worker pool (internal/meta/cassandra/listfanout.go) caps concurrent shard queries at Store.listConcurrency (STRATA_CASSANDRA_LIST_CONCURRENCY / cassandra.list_concurrency, default 16, clamp [1,256]) — replaces the one-goroutine-per-shard-no-semaphore loop in ListObjects + ListObjectVersions. Per-cursor page capped at listPageSize=256 (decoupled from request limit≤1000; advance() auto-pages, truncation still counts emitted rows). LOCAL_QUORUM pinned explicitly on openShardCursor/openVersionCursor/AllObjectVersions. Config-wired through CassandraConfig.ListConcurrency + envMap + strata.toml.example + env-vars.md (TestEnvTOMLParity green); Options.ListConcurrency<=0 falls back to ListConcurrencyFromEnv(). Proof: pure-Go unit TestRunBoundedFanOut_CapsConcurrency (peak in-flight<=concurrency, RED vs old per-shard spawn) + error/cancel/clamp + TestListConcurrencyFromEnv; integration TestCassandraListBoundedFanOut (128-shard bucket, ListConcurrency=4: read-after-write at LOCAL_QUORUM + 16 concurrent listings return stable complete sorted key set). TiKV unaffected (single range scan). strata-correctness-reviewer: clean, no blocking/suggestion. make vet + cassandra/config suites green CGO_ENABLED=0; integration leg under -tags integration / CI."
-    },
-    {
-      "id": "US-010",
-      "title": "Cassandra integration tests back on a CI gate (parity)",
-      "description": "As a maintainer aiming for TiKV + Cassandra parity, I want the Cassandra meta.Store LWT/Paxos contract running on CI so Cassandra regressions are caught, not just found locally.",
-      "acceptanceCriteria": [
-        "Cassandra contract round-trips (TestCassandraStoreContract/*, GCQueueShardFanOut, VersioningSuspendedReplaceNull, plus the new shard/reshard cases from US-001..US-005) run on a green required CI check - delivered this cycle as a dedicated job on a beefier runner because the A1b parity decision does not allow Cassandra to stay untested",
-        "Root-cause the per-PR-runner JVM/Paxos starvation (heap cap / readiness / per-test resource limits) so Cassandra can rejoin the per-PR gate; if the root-cause lands this cycle run it per-PR, else the dedicated job is required and the root-cause is a tracked owned ticket (not 'someday')",
-        "The job is green and its name is added to branch-protection required checks (documented as a manual post-merge step if admin token is needed, mirroring the QA-cycle coverage-gate step)",
-        "ROADMAP 'Cassandra integration tests gated off per-PR CI' entry close-flipped or updated with the new job reference",
-        "CI config validates locally; make vet unaffected"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": ""
-    },
-    {
-      "id": "US-011",
-      "title": "End-to-end pre-prod validation walkthrough",
-      "description": "As the release owner, I want one e2e pass that exercises the whole hardened path on both backends so the GO/NO-GO decision rests on observed behaviour, not story-by-story claims.",
-      "acceptanceCriteria": [
-        "A single documented walkthrough (script + runbook section) brings up both the TiKV-default and the Cassandra-profile labs and exercises: per-bucket non-default shard count, an online 64->128 reshard under concurrent writes (Cassandra), DeleteObjects batch + versioned, a policy-only anonymous GET (union semantics), and a plaintext chunk-corruption fail-loud",
-        "The console reshard UI (US-006) is driven in the same pass",
-        "Outcome captured in a short readiness note (pass/fail per leg) committed under tasks/",
-        "make vet passes; the new smokes pass",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": "Composite e2e walkthrough scripts/smoke-architecture-hardening.sh (make smoke-architecture-hardening) + runbook docs/site/content/operate/pre-prod-validation.md + readiness note tasks/architecture-hardening-readiness.md. Leg F (CRC fail-loud) observed green locally CGO_ENABLED=0; legs A-E lab-gated (each has a green discriminating per-PR/dedicated-CI test). make vet unaffected (no Go source changed)."
     }
   ]
 }
