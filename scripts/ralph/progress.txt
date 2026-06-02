@@ -567,3 +567,38 @@ Cycle: ralph/metadata-data-reconcile
   - IsLatest discriminator tests MUST pick version_id ordering that DISAGREES with mtime (newer mtime → smaller
     version_id), else a regression to version_id-sort passes silently. Mutation-test the guard.
 ---
+
+## 2026-06-03 - US-007 End-to-end reconcile/rebuild validation walkthrough
+- Delivered the single integrated exercise that proves the whole cycle works TOGETHER (the prior
+  stories each cover one aspect; nothing tied them into one narrative + a lab contract smoke).
+- Files changed:
+  - internal/reconcile/walkthrough_test.go (NEW): TestEndToEndReconcileWalkthrough — one narrative,
+    CI-green on memory. Seed healthy obj → Skew A (orphan: report visible/no-delete, gc enqueues exactly
+    the orphan) → Skew B (restore rebuilds the lost manifest, correct bytes+ETag) → dangling pass
+    (report counts, quarantine flags the broken obj so GET 503s) → rebuild-index (2-chunk plaintext full
+    recovery + gap flagged + SSE unrecoverable, gapped/SSE NEVER written). Pins both cycle-promises:
+    no silent leak + no silent corrupt GET.
+  - scripts/smoke-metadata-data-reconcile.sh (NEW) + Makefile target + .PHONY: drives the console
+    contract (/admin/v1/reconcile POST→202→poll GET→terminal+summary) across BOTH labs (TiKV :9999 +
+    Cassandra :9998) for parity, plus `strata admin rebuild-index --dry-run` via docker exec. Skip-77
+    when no lab up (mirrors smoke-reshard). Proves the US-006 console UI is not a no-op stub.
+  - docs/site/content/operate/metadata-data-reconcile.md: new "## End-to-end validation walkthrough"
+    section (deterministic core test + lab contract smoke, with the integration-gated boundary spelled out).
+- Verification: go build ./... + go vet ./... clean; go test ./internal/reconcile/... ./internal/rebuild/...
+  green; smoke script `bash -n` syntax-clean + skip-77 path exercised. RADOS resolution legs
+  (orphan pool scan, dangling per-OID probe) remain integration-only — the smoke accepts `error` as a
+  terminal state for the queue/progress/summary CONTRACT; the deterministic core is the correctness oracle.
+- **Learnings for future iterations:**
+  - EXTERNAL-TEST-PACKAGE breaks the import cycle: rebuild imports reconcile, so to drive BOTH engines in
+    one test put it in `package reconcile_test` (external) — Go lets an external test package depend on a
+    package that imports the package-under-test. Define local fakes (walkScanner/walkProber) implementing
+    the EXPORTED interfaces (reconcile.ChunkScanner/ChunkProber); the unexported fakeScanner in
+    reconcile_test.go is not visible from the external package.
+  - TWO reconcile HTTP surfaces: s3api `/admin/reconcile` (SigV4, query params) vs adminapi
+    `/admin/v1/reconcile` (console session cookie, JSON body, GET .../{id}). The web console (US-006) rides
+    the adminapi one — a console smoke must login via POST /admin/v1/auth/login and use the cookie jar.
+  - Lab smokes that need iam-root creds + a running stack are NOT part of `make smoke` (that's just
+    scripts/smoke.sh); they only join the .PHONY list + get their own make target (pattern: smoke-reshard).
+  - rebuild recomputes a SINGLE-PART ETag = md5(concat of ordered chunk bytes); a 2-chunk version's ETag
+    assertion must hash the concatenation, not the per-chunk manifest ETag.
+---

@@ -246,6 +246,71 @@ The scan is rate-limited via `STRATA_RECONCILE_SCAN_RATE` (objects/sec,
 read in the data layer; `0` or unset = unlimited) so a live-cluster
 pool walk does not saturate the OSDs. Set it during business hours.
 
+## End-to-end validation walkthrough
+
+Before trusting the feature in an incident, validate the whole pipeline —
+both skew directions, both passes, every policy, and the last-resort
+rebuild — in one exercise. Two artifacts cover it, layered so the
+deterministic core runs in CI and the operator-facing contract runs
+against the real lab.
+
+### 1. Deterministic core (CI-green, no RADOS)
+
+`internal/reconcile/walkthrough_test.go::TestEndToEndReconcileWalkthrough`
+is the single narrative that pins both cycle-promises against the memory
+backends (the parity oracle):
+
+1. Seed a healthy object the walk must never disturb.
+2. **Skew A — data-older-than-meta** (orphan chunk): `report` makes the
+   orphan **visible** and deletes nothing; `gc` enqueues exactly the
+   orphan. *No silent leak* — GC walks meta→data and could never see it
+   before this cycle.
+3. **Skew B — meta-older-than-data** (lost manifest row): `restore`
+   rebuilds the manifest from the back-reference; the object is GET-able
+   again with correct bytes + recomputed ETag.
+4. **Dangling pass** (meta→data): a manifest pointing at a missing chunk
+   is detected and `quarantine` flags the object so a GET returns a clear
+   `ObjectQuarantined` error. *No silent corrupt GET.*
+5. **rebuild-index**: a two-chunk plaintext version recovers fully, a gap
+   is flagged (never stitched short + served), an SSE object is reported
+   unrecoverable.
+
+Run it directly:
+
+```bash
+go test -run TestEndToEndReconcileWalkthrough ./internal/reconcile/
+```
+
+The memory backend is the contract oracle for TiKV **and** Cassandra (both
+implement `meta.Store` in lockstep), so this proves the backend-agnostic
+semantics for both meta backends.
+
+### 2. Operator contract against the running lab
+
+`scripts/smoke-metadata-data-reconcile.sh` (`make
+smoke-metadata-data-reconcile`) drives the path the web console (US-006)
+rides — the UI is **not** a no-op stub — across **both** labs for parity:
+
+- TiKV-default lab on `:9999`, Cassandra lab on `:9998`.
+- Console session login → seed a bucket → queue a **dangling** pass and an
+  **orphan** pass via `POST /admin/v1/reconcile` → poll
+  `GET /admin/v1/reconcile/{id}` through `queued → running → done|error`
+  and assert the progress/summary counters render.
+- `strata admin rebuild-index --dry-run` in the gateway container.
+
+Bring a lab up with the worker enabled, then run:
+
+```bash
+STRATA_WORKERS=gc,lifecycle,reconcile make up-all && make wait-strata-lab
+make smoke-metadata-data-reconcile     # exits 77 (skip) if no lab is up
+```
+
+The deep RADOS resolution legs (orphan pool scan, dangling per-OID probe)
+are **integration-gated** — on a lab without the real RADOS prober/scanner
+a job may converge to `error`, which the smoke accepts as a terminal state
+for the queue/progress/summary contract. The deterministic core above is
+what proves the resolution semantics.
+
 ## See also
 
 - [Backup + restore]({{< relref "/operate/backup-restore" >}}) — how

@@ -11,7 +11,7 @@ COMPOSE := docker compose -f deploy/docker/docker-compose.yml
 	smoke-drain-lifecycle smoke-drain-transparency smoke-drain-progress-ui smoke-cluster-weights \
 	smoke-drain-cleanup smoke-drain-followup smoke-effective-placement smoke-rebalance-scale \
 	smoke-single-binary smoke-tikv-default-lab smoke-rgw-lab-restart smoke-observability smoke-supply-chain \
-	smoke-reshard smoke-architecture-hardening \
+	smoke-reshard smoke-architecture-hardening smoke-metadata-data-reconcile \
 	race-soak race-soak-tikv lint-nginx-lab helm-lint promtool-check govulncheck trivy-check gosec license-audit slo-report \
 	bench-gc bench-lifecycle bench-gc-multi bench-lifecycle-multi bench-rebalance-multi bench-rgw-comparison bench-rgw-comparison-with-cassandra \
 	docs-serve docs-build docs-openapi-copy clean
@@ -480,6 +480,21 @@ smoke-reshard:
 # SMOKE_AH_*) and the readiness note tasks/architecture-hardening-readiness.md.
 smoke-architecture-hardening:
 	bash scripts/smoke-architecture-hardening.sh
+
+# End-to-end reconcile / rebuild-index console-contract smoke (US-007 of
+# ralph/metadata-data-reconcile). Across BOTH labs (TiKV :9999 + Cassandra
+# :9998) it logs into the console, seeds a bucket, queues a dangling pass + an
+# orphan pass via POST /admin/v1/reconcile and polls the
+# trigger->progress->summary path to a terminal state, then runs
+# `strata admin rebuild-index --dry-run` in the gateway container. Each lab
+# WARN-skips when down; exits 77 when neither is up unless REQUIRE_LAB=1. Needs
+# the reconcile worker enabled: STRATA_WORKERS=gc,lifecycle,reconcile make
+# up-all. The deep data-tier correctness (both skews, restore, full rebuild) is
+# pinned by internal/reconcile/walkthrough_test.go; RADOS resolution legs are
+# integration-gated. See scripts/smoke-metadata-data-reconcile.sh for env knobs
+# (TIKV_BASE, CASS_BASE, SMOKE_RC_*) and docs operate/metadata-data-reconcile.md.
+smoke-metadata-data-reconcile:
+	bash scripts/smoke-metadata-data-reconcile.sh
 
 # Race-soak driver (US-006). Brings up the Cassandra-backed stack
 # (`make up-all-ci` when CI=true, else `make up-cassandra`), waits for
