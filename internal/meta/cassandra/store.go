@@ -72,6 +72,12 @@ type Store struct {
 	// lookup; StartReshard / CompleteReshard invalidate the entry synchronously.
 	shardCacheMu sync.Mutex
 	shardCache   map[uuid.UUID]shardCacheEntry
+
+	// listConcurrency caps the per-request shard fan-out worker pool so
+	// ListObjects / ListObjectVersions check out at most this many gocql
+	// connections at once regardless of the bucket's shard count (US-012).
+	// Resolved from STRATA_CASSANDRA_LIST_CONCURRENCY (or Options) at Open.
+	listConcurrency int
 }
 
 // shardCacheEntry is one bucket's resolved shard layout. active is the live
@@ -91,6 +97,10 @@ const shardCacheTTL = 10 * time.Second
 
 type Options struct {
 	DefaultShardCount int
+	// ListConcurrency caps the per-request shard fan-out worker pool
+	// (US-012). Zero / negative falls back to ListConcurrencyFromEnv()
+	// (STRATA_CASSANDRA_LIST_CONCURRENCY, default DefaultListConcurrency).
+	ListConcurrency int
 	// GCDualWrite controls whether the GC queue is dual-written to the
 	// legacy `gc_queue` table alongside `gc_entries_v2` (US-002 Phase 2
 	// cutover). Defaults to GCDualWriteFromEnv() when zero-valued via
@@ -118,6 +128,13 @@ func Open(cfg SessionConfig, opts Options) (*Store, error) {
 	if opts.DefaultShardCount <= 0 {
 		opts.DefaultShardCount = 64
 	}
+	listConcurrency := opts.ListConcurrency
+	if listConcurrency <= 0 {
+		listConcurrency = ListConcurrencyFromEnv()
+	}
+	if listConcurrency > maxListConcurrency {
+		listConcurrency = maxListConcurrency
+	}
 	gcDualWrite := GCDualWriteFromEnv()
 	if opts.GCDualWrite != nil {
 		gcDualWrite = *opts.GCDualWrite
@@ -129,6 +146,8 @@ func Open(cfg SessionConfig, opts Options) (*Store, error) {
 		bucketNames:  make(map[uuid.UUID]string),
 		gcDualWrite:  gcDualWrite,
 		shardCache:   make(map[uuid.UUID]shardCacheEntry),
+
+		listConcurrency: listConcurrency,
 	}
 	store.obs = NewQueryObserver(cfg.Logger, time.Duration(cfg.SlowMS)*time.Millisecond, cfg.Metrics, cfg.Tracer)
 	return store, nil
@@ -1079,30 +1098,24 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 		return nil, err
 	}
 
+	// Bounded fan-out (US-012): at most s.listConcurrency shard partitions are
+	// queried concurrently so the gocql connection pool / goroutine count stay
+	// capped regardless of shardCount. Per-cursor page is bounded too
+	// (listPageSize), independent of the request limit.
 	cursors := make([]*shardCursor, 0, shardCount)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-	errCh := make(chan error, shardCount)
-
-	for shard := range shardCount {
-		wg.Add(1)
-		go func(shard int) {
-			defer wg.Done()
-			c, err := s.openShardCursor(ctx, bucketID, shard, opts.Marker, opts.Prefix, limit+1)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if c != nil {
-				mu.Lock()
-				cursors = append(cursors, c)
-				mu.Unlock()
-			}
-		}(shard)
-	}
-	wg.Wait()
-	close(errCh)
-	if err := <-errCh; err != nil {
+	if err := runBoundedFanOut(ctx, shardCount, s.listConcurrency, func(shard int) error {
+		c, err := s.openShardCursor(ctx, bucketID, shard, opts.Marker, opts.Prefix, listPageSize)
+		if err != nil {
+			return err
+		}
+		if c != nil {
+			mu.Lock()
+			cursors = append(cursors, c)
+			mu.Unlock()
+		}
+		return nil
+	}); err != nil {
 		for _, c := range cursors {
 			c.close()
 		}
@@ -1192,30 +1205,22 @@ func (s *Store) ListObjectVersions(ctx context.Context, bucketID uuid.UUID, opts
 		return nil, err
 	}
 
+	// Bounded fan-out (US-012): see ListObjects. The worker pool caps concurrent
+	// shard queries; listPageSize caps each cursor's resident page.
 	cursors := make([]*versionCursor, 0, shardCount)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
-	errCh := make(chan error, shardCount)
-
-	for shard := range shardCount {
-		wg.Add(1)
-		go func(shard int) {
-			defer wg.Done()
-			c, err := s.openVersionCursor(ctx, bucketID, shard, opts.Marker, limit*2)
-			if err != nil {
-				errCh <- err
-				return
-			}
-			if c != nil {
-				mu.Lock()
-				cursors = append(cursors, c)
-				mu.Unlock()
-			}
-		}(shard)
-	}
-	wg.Wait()
-	close(errCh)
-	if err := <-errCh; err != nil {
+	if err := runBoundedFanOut(ctx, shardCount, s.listConcurrency, func(shard int) error {
+		c, err := s.openVersionCursor(ctx, bucketID, shard, opts.Marker, listPageSize)
+		if err != nil {
+			return err
+		}
+		if c != nil {
+			mu.Lock()
+			cursors = append(cursors, c)
+			mu.Unlock()
+		}
+		return nil
+	}); err != nil {
 		for _, c := range cursors {
 			c.close()
 		}
@@ -1337,7 +1342,7 @@ func (s *Store) AllObjectVersions(ctx context.Context, bucketID uuid.UUID) ([]*m
 			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
-		).WithContext(ctx).PageSize(2000).Iter()
+		).WithContext(ctx).Consistency(gocql.LocalQuorum).PageSize(2000).Iter()
 		for {
 			var (
 				key          string
@@ -1562,20 +1567,23 @@ func (c *versionCursor) advance() bool {
 
 func (s *Store) openVersionCursor(ctx context.Context, bucketID uuid.UUID, shard int, marker string, pageSize int) (*versionCursor, error) {
 	var iter *gocql.Iter
+	// Pin LOCAL_QUORUM explicitly (US-012): the listing read-consistency
+	// guarantee must not depend on the cluster/session default an operator may
+	// have lowered.
 	if marker == "" {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
-		).WithContext(ctx).PageSize(pageSize).Iter()
+		).WithContext(ctx).Consistency(gocql.LocalQuorum).PageSize(pageSize).Iter()
 	} else {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta, is_null
 			 FROM objects WHERE bucket_id=? AND shard=? AND key >= ?`,
 			gocqlUUID(bucketID), shard, marker,
-		).WithContext(ctx).PageSize(pageSize).Iter()
+		).WithContext(ctx).Consistency(gocql.LocalQuorum).PageSize(pageSize).Iter()
 	}
 	return &versionCursor{iter: iter, bucket: bucketID}, nil
 }
@@ -1682,20 +1690,21 @@ func (c *shardCursor) advance() bool {
 
 func (s *Store) openShardCursor(ctx context.Context, bucketID uuid.UUID, shard int, marker, _ string, pageSize int) (*shardCursor, error) {
 	var iter *gocql.Iter
+	// Pin LOCAL_QUORUM explicitly (US-012) — see openVersionCursor.
 	if marker == "" {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta
 			 FROM objects WHERE bucket_id=? AND shard=?`,
 			gocqlUUID(bucketID), shard,
-		).WithContext(ctx).PageSize(pageSize).Iter()
+		).WithContext(ctx).Consistency(gocql.LocalQuorum).PageSize(pageSize).Iter()
 	} else {
 		iter = s.s.Query(
 			`SELECT key, version_id, is_delete_marker, size, etag, content_type,
 			        storage_class, mtime, manifest, user_meta
 			 FROM objects WHERE bucket_id=? AND shard=? AND key > ?`,
 			gocqlUUID(bucketID), shard, marker,
-		).WithContext(ctx).PageSize(pageSize).Iter()
+		).WithContext(ctx).Consistency(gocql.LocalQuorum).PageSize(pageSize).Iter()
 	}
 	return &shardCursor{iter: iter, bucket: bucketID, shard: shard}, nil
 }

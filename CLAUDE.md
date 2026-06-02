@@ -444,6 +444,16 @@ heap-merges by clustering order (key ASC, version_id DESC). See `cassandra/store
 `versionHeap` types. A new range-scan-capable backend (e.g. TiKV) would short-circuit this via the optional
 `RangeScanStore` interface (see ROADMAP).
 
+**Bounded fan-out (US-012).** The fan-out is NOT one-goroutine-per-shard. `runBoundedFanOut`
+(`cassandra/listfanout.go`, sized by `STRATA_CASSANDRA_LIST_CONCURRENCY` → `Store.listConcurrency`, default 16,
+clamp [1,256]) caps concurrent shard queries so gocql connections/goroutines stay bounded regardless of `N`. Each
+cursor buffers at most one bounded page (`listPageSize=256`), decoupled from the request `limit` (≤1000) — the
+merge auto-pages via `advance()`, so a small page is a fetch-granularity choice, never a truncation one (truncation
+= counting emitted rows). Listing queries pin `gocql.LocalQuorum` EXPLICITLY (`openShardCursor` /
+`openVersionCursor` / `AllObjectVersions`) so read-after-write coherence doesn't ride on a session default. The
+knob is config-wired (`cassandra.list_concurrency`); `Options.ListConcurrency<=0` falls back to
+`ListConcurrencyFromEnv()`.
+
 **Per-bucket shard resolution + reshard transitional model (US-001/US-002).** Every object-addressing site resolves the
 bucket's stored `ShardCount` via `bucketShardCounts` (short-TTL cache), NEVER the process-global `s.defaultShard` — a
 mismatch point-reads the wrong partition and 404s. While a reshard is in flight (`shard_count_target != 0`) the store

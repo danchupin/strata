@@ -165,8 +165,14 @@ type CassandraConfig struct {
 	// SlowMS is the WARN threshold (in milliseconds) applied by the
 	// gocql QueryObserver. 0 disables; unset falls back to the
 	// observer's DefaultSlowQueryMS (100ms). Wired via STRATA_CASSANDRA_SLOW_MS.
-	SlowMS int                `koanf:"slow_ms"`
-	TLS    CassandraTLSConfig `koanf:"tls"`
+	SlowMS int `koanf:"slow_ms"`
+	// ListConcurrency caps how many shard partitions a single ListObjects /
+	// ListObjectVersions request queries concurrently (US-012). Bounds the
+	// gocql connection-pool / goroutine footprint regardless of a bucket's
+	// shard count. 0 / unset falls back to DefaultListConcurrency (16);
+	// values above 256 clamp. Wired via STRATA_CASSANDRA_LIST_CONCURRENCY.
+	ListConcurrency int                `koanf:"list_concurrency"`
+	TLS             CassandraTLSConfig `koanf:"tls"`
 }
 
 // CassandraTLSConfig wires gocql.SslOptions for the Cassandra meta backend
@@ -819,6 +825,7 @@ var envMap = map[string]string{
 	"STRATA_BUCKETSTATS_INTERVAL":            "bucket_stats.interval",
 	"STRATA_BUCKETSTATS_TOPN":                "bucket_stats.top_n",
 	"STRATA_CASSANDRA_SLOW_MS":               "cassandra.slow_ms",
+	"STRATA_CASSANDRA_LIST_CONCURRENCY":      "cassandra.list_concurrency",
 	"STRATA_CLUSTER_NAME":                    "cluster.name",
 	"STRATA_CONSOLE_JWT_SECRET":              "console.jwt_secret",
 	"STRATA_CONSOLE_THEME_DEFAULT":           "console.theme_default",
@@ -1188,6 +1195,9 @@ func (c *Config) clampMisc() {
 	if c.Cassandra.SlowMS < 0 {
 		slog.Warn("clamping config value", "key", "cassandra.slow_ms", "value", c.Cassandra.SlowMS, "min", 0)
 		c.Cassandra.SlowMS = 0
+	}
+	if c.Cassandra.ListConcurrency != 0 {
+		c.Cassandra.ListConcurrency = clampInt("cassandra.list_concurrency", c.Cassandra.ListConcurrency, 1, 256)
 	}
 	if c.BucketStats.TopN < 0 {
 		slog.Warn("clamping config value", "key", "bucket_stats.top_n", "value", c.BucketStats.TopN, "min", 0)

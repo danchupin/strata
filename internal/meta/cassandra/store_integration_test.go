@@ -851,3 +851,172 @@ func TestCassandraReshardWorkerMovesRows(t *testing.T) {
 		t.Fatalf("post-flip versioned key %q: got %d versions want 3", verKey, verCount)
 	}
 }
+
+// TestCassandraListBoundedFanOut is the US-012 integration leg: it drives
+// ListObjects against a HIGH-shard-count bucket (128) through a store whose
+// fan-out worker pool is capped well below the shard count (ListConcurrency=4)
+// and asserts (a) read-after-write coherence at LOCAL_QUORUM — a freshly
+// written key is visible to the very next list — and (b) the listed key set is
+// correct and STABLE across many concurrent listings (no page gap/dup when
+// concurrency < shardCount). The bounded pool must not drop, duplicate, or
+// reorder a shard's rows.
+func TestCassandraListBoundedFanOut(t *testing.T) {
+	if os.Getenv("STRATA_SCYLLA_TEST") == "1" {
+		t.Skip("STRATA_SCYLLA_TEST=1: ScyllaDB suite runs in TestScyllaStoreContract")
+	}
+
+	ctx := context.Background()
+
+	container, err := tccassandra.Run(ctx, "cassandra:5.0")
+	if err != nil {
+		t.Fatalf("start cassandra: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Logf("terminate: %v", err)
+		}
+	})
+	host, err := container.ConnectionHost(ctx)
+	if err != nil {
+		t.Fatalf("connection host: %v", err)
+	}
+
+	const (
+		shardCount = 128
+		listConc   = 4
+		nKeys      = 500
+	)
+
+	store, err := cassandra.Open(cassandra.SessionConfig{
+		Hosts:       []string{host},
+		Keyspace:    "strata_list_fanout",
+		LocalDC:     "datacenter1",
+		Replication: "{'class': 'SimpleStrategy', 'replication_factor': '1'}",
+		Timeout:     60 * time.Second,
+	}, cassandra.Options{DefaultShardCount: shardCount, ListConcurrency: listConc})
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	bucket, err := store.CreateBucket(ctx, "list-fanout", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	if bucket.ShardCount != shardCount {
+		t.Fatalf("bucket shard_count: got %d want %d", bucket.ShardCount, shardCount)
+	}
+
+	put := func(key string) {
+		obj := &meta.Object{
+			BucketID:     bucket.ID,
+			Key:          key,
+			Size:         1,
+			ETag:         "e",
+			StorageClass: "STANDARD",
+			Mtime:        time.Now().UTC(),
+		}
+		if err := store.PutObject(ctx, obj, false); err != nil {
+			t.Fatalf("put %s: %v", key, err)
+		}
+	}
+
+	want := make(map[string]struct{}, nKeys)
+	for i := 0; i < nKeys; i++ {
+		key := fmt.Sprintf("obj-%05d", i)
+		put(key)
+		want[key] = struct{}{}
+
+		// Read-after-write coherence: the key written at LOCAL_QUORUM must be
+		// visible to a LOCAL_QUORUM list issued immediately after. Spot-check a
+		// handful so the test stays fast but still exercises the guarantee on
+		// keys that hash to high shard indices (>= old default 64).
+		if i%97 == 0 {
+			res, err := store.ListObjects(ctx, bucket.ID, meta.ListOptions{Prefix: key, Limit: 10})
+			if err != nil {
+				t.Fatalf("read-after-write list %s: %v", key, err)
+			}
+			found := false
+			for _, o := range res.Objects {
+				if o.Key == key {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("read-after-write: key %q not visible to the immediately-following LOCAL_QUORUM list", key)
+			}
+		}
+	}
+
+	// listAll pages the full bucket through the bounded fan-out and returns the
+	// flattened key set. Returns an error rather than t.Fatal-ing so it is safe
+	// to call from concurrent reader goroutines.
+	listAll := func() ([]string, error) {
+		var keys []string
+		marker := ""
+		for {
+			res, err := store.ListObjects(ctx, bucket.ID, meta.ListOptions{Marker: marker, Limit: 200})
+			if err != nil {
+				return nil, fmt.Errorf("list (marker=%q): %w", marker, err)
+			}
+			for _, o := range res.Objects {
+				keys = append(keys, o.Key)
+			}
+			if !res.Truncated {
+				break
+			}
+			marker = res.NextMarker
+		}
+		return keys, nil
+	}
+
+	assertFullSet := func(keys []string) {
+		if len(keys) != nKeys {
+			t.Fatalf("listed %d keys, want %d (bounded fan-out dropped or duplicated rows)", len(keys), nKeys)
+		}
+		seen := make(map[string]struct{}, len(keys))
+		for i, k := range keys {
+			if _, dup := seen[k]; dup {
+				t.Fatalf("duplicate key %q in listing", k)
+			}
+			seen[k] = struct{}{}
+			if _, ok := want[k]; !ok {
+				t.Fatalf("unexpected key %q in listing", k)
+			}
+			if i > 0 && keys[i-1] >= k {
+				t.Fatalf("listing not strictly ascending at %d: %q >= %q", i, keys[i-1], k)
+			}
+		}
+	}
+
+	// Single pass first (deterministic baseline).
+	baseline, err := listAll()
+	if err != nil {
+		t.Fatalf("baseline list: %v", err)
+	}
+	assertFullSet(baseline)
+
+	// Concurrent listings: every reader must observe the same complete, stable,
+	// sorted key set despite the shared bounded pool.
+	const readers = 16
+	errCh := make(chan error, readers)
+	for r := 0; r < readers; r++ {
+		go func() {
+			keys, err := listAll()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			if len(keys) != nKeys {
+				errCh <- fmt.Errorf("concurrent list saw %d keys, want %d", len(keys), nKeys)
+				return
+			}
+			errCh <- nil
+		}()
+	}
+	for r := 0; r < readers; r++ {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

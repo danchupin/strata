@@ -57,6 +57,32 @@ resumes exactly where the previous left off. This is the
 N-way-fan-out path the gateway uses when the meta backend does NOT
 implement `RangeScanStore`.
 
+### Bounded fan-out + read consistency (US-012)
+
+The fan-out is **bounded**, not one-goroutine-per-shard. A worker pool
+(`runBoundedFanOut`, sized by `STRATA_CASSANDRA_LIST_CONCURRENCY`, default
+`16`, clamped `[1, 256]`) caps how many shard partitions a single listing
+queries concurrently, so the gocql connection pool and goroutine count stay
+bounded no matter how high `N` (per-bucket shard count) climbs or how many
+listings run at once. The earlier unbounded fan-out spawned `N` goroutines +
+`N` connection checkouts per request and exploded under
+`high-N × concurrent-lists`.
+
+**Memory.** Each shard cursor buffers at most one bounded gocql page
+(`listPageSize = 256` rows) regardless of the request `limit` (up to 1000);
+the heap-merge auto-pages a cursor via `advance()` so a small page is purely a
+fetch-granularity choice, never a correctness/truncation one (truncation is
+decided by counting emitted rows). Resident listing memory is therefore
+`N × listPageSize` rows of buffered page plus the `N` heap heads — and the
+concurrently-fetching burst is capped at `listConcurrency × listPageSize` — not
+the old `N × (limit+1)`.
+
+**Consistency.** The listing queries pin `LOCAL_QUORUM` explicitly rather than
+inheriting the cluster/session default, so the read-after-write guarantee a
+client expects (a `LOCAL_QUORUM` write is visible to the very next
+`LOCAL_QUORUM` list) does not depend on an operator not having lowered a
+Cassandra default.
+
 ## RangeScanStore short-circuit
 
 Backends with a globally-ordered keyspace skip the fan-out. `meta.RangeScanStore`

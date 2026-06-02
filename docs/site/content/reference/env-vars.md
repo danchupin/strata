@@ -109,6 +109,7 @@ the meta-backend contract.
 | `STRATA_CASSANDRA_PASSWORD` | empty | string | Auth password. | `cassandra.password` |
 | `STRATA_CASSANDRA_TIMEOUT` | `10s` | Go duration | Per-query timeout. | `cassandra.timeout` |
 | `STRATA_CASSANDRA_SLOW_MS` | `100` | positive int (ms) | Slow-query WARN threshold for the Cassandra query observer. | `cassandra.slow_ms` |
+| `STRATA_CASSANDRA_LIST_CONCURRENCY` | `16` | int `[1, 256]` | Per-request shard fan-out cap for `ListObjects` / `ListObjectVersions`. Bounds gocql connections/goroutines regardless of a bucket's shard count (US-012). 0/unset → 16; above 256 clamps. | `cassandra.list_concurrency` |
 | `STRATA_CASSANDRA_TLS_CA_FILE` | empty | path | PEM CA bundle for server-cert verification. Empty → system root pool (when any TLS field is set) or plain-TCP (when all TLS fields unset). | `cassandra.tls.ca_file` |
 | `STRATA_CASSANDRA_TLS_CERT_FILE` | empty | path | PEM client certificate for mutual TLS. Must be paired with `STRATA_CASSANDRA_TLS_KEY_FILE`. | `cassandra.tls.cert_file` |
 | `STRATA_CASSANDRA_TLS_KEY_FILE` | empty | path | PEM private key matching `STRATA_CASSANDRA_TLS_CERT_FILE`. | `cassandra.tls.key_file` |

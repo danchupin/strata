@@ -174,8 +174,8 @@
         "Tests pass"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Bounded fan-out: new runBoundedFanOut worker pool (internal/meta/cassandra/listfanout.go) caps concurrent shard queries at Store.listConcurrency (STRATA_CASSANDRA_LIST_CONCURRENCY / cassandra.list_concurrency, default 16, clamp [1,256]) — replaces the one-goroutine-per-shard-no-semaphore loop in ListObjects + ListObjectVersions. Per-cursor page capped at listPageSize=256 (decoupled from request limit≤1000; advance() auto-pages, truncation still counts emitted rows). LOCAL_QUORUM pinned explicitly on openShardCursor/openVersionCursor/AllObjectVersions. Config-wired through CassandraConfig.ListConcurrency + envMap + strata.toml.example + env-vars.md (TestEnvTOMLParity green); Options.ListConcurrency<=0 falls back to ListConcurrencyFromEnv(). Proof: pure-Go unit TestRunBoundedFanOut_CapsConcurrency (peak in-flight<=concurrency, RED vs old per-shard spawn) + error/cancel/clamp + TestListConcurrencyFromEnv; integration TestCassandraListBoundedFanOut (128-shard bucket, ListConcurrency=4: read-after-write at LOCAL_QUORUM + 16 concurrent listings return stable complete sorted key set). TiKV unaffected (single range scan). strata-correctness-reviewer: clean, no blocking/suggestion. make vet + cassandra/config suites green CGO_ENABLED=0; integration leg under -tags integration / CI."
     },
     {
       "id": "US-010",

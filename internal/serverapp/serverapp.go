@@ -824,7 +824,10 @@ func buildMetaStore(cfg *config.Config, logger *slog.Logger, tp *strataotel.Prov
 				Tracer:      tp.Tracer("strata.meta.cassandra"),
 				TLS:         tlsCfg,
 			},
-			metacassandra.Options{DefaultShardCount: cfg.DefaultBucketShards},
+			metacassandra.Options{
+				DefaultShardCount: cfg.DefaultBucketShards,
+				ListConcurrency:   cfg.Cassandra.ListConcurrency,
+			},
 		)
 	case "tikv":
 		eps := parseTiKVEndpoints(cfg.TiKV.Endpoints)
