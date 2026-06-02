@@ -116,7 +116,7 @@ adding more, prove what is there.
   fetched in full, verified, then sliced (interior chunks always verified). Verification
   on by default, env opt-out `STRATA_CHUNK_CRC_VERIFY=false`. SSE unaffected (AEAD already
   covers it). Red/green proof in `internal/data/memory/corruption_test.go` +
-  `internal/data/rados/prefetch_test.go`. (commit `<pending>`)
+  `internal/data/rados/prefetch_test.go`. (commit `120013d`)
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,
