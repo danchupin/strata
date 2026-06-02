@@ -97,6 +97,17 @@ export {
   type ReshardState,
 } from './reshard';
 
+export {
+  startReconcile,
+  fetchReconcileJob,
+  type ReconcileJob,
+  type ReconcileState,
+  type ReconcilePass,
+  type OrphanPolicy,
+  type DanglingPolicy,
+  type StartReconcileRequest,
+} from './reconcile';
+
 // Placeholder wrappers for endpoints that land in later stories. Importing the
 // names here lets components reference them today without per-page file churn
 // when US-009/US-010/US-011 wire the real fetchers.

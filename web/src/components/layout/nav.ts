@@ -10,6 +10,7 @@ import {
   Layers,
   Network,
   Settings,
+  Stethoscope,
   Timer,
   Users,
   type LucideIcon,
@@ -53,6 +54,7 @@ export const primaryNav: NavSection[] = [
       { to: '/diagnostics/slow-queries', label: 'Slow queries', icon: Timer },
       { to: '/diagnostics/trace', label: 'Trace browser', icon: Network },
       { to: '/diagnostics/hot-buckets', label: 'Hot buckets', icon: Flame },
+      { to: '/diagnostics/reconcile', label: 'Reconcile', icon: Stethoscope },
     ],
   },
 ];

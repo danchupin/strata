@@ -127,6 +127,15 @@ for a go/no-go:
 | `dangling_found` / `dangling_quarantine` / `dangling_report` | broken manifests, by resolution |
 | `errors` | per-chunk errors skipped (never delete on doubt) |
 
+> **Web console (US-006).** The same trigger + progress + summary is
+> available in the operator console under **Diagnostics → Reconcile**
+> (`/console/diagnostics/reconcile`, cookie-authenticated `/admin/v1/reconcile`).
+> Pick the pass direction + policy, queue the job, and watch the orphan /
+> dangling counters converge — mirroring the drain / reshard-progress UX.
+> `rebuild-index` is deliberately **not** exposed in the console (a
+> destructive last-resort op gated behind shell access); the console links
+> back to this runbook instead.
+
 ### Step 3 — Resolve
 
 Decide a policy from the report, then re-run that direction with it.

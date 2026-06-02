@@ -35,6 +35,27 @@ Cycle: ralph/metadata-data-reconcile
   Disabled/Suspended → `meta.NullVersionID`) and pre-set `Object.VersionID` +
   `Object.Mtime` BEFORE PutChunks — both backends honour a pre-set non-empty
   VersionID. Otherwise version_id is minted by PutObject AFTER PutChunks.
+- WEB CONSOLE wiring (full stack for a new operator action): (1) Go handler in
+  `internal/adminapi/<name>.go` on the COOKIE-authed `/admin/v1/*` surface (NOT
+  the SigV4/IAM-root s3api `/admin/*` surface the CLI/curl uses — the console
+  can't sign). Mirror the s3api handler's meta calls + `s3api.SetAuditOverride`.
+  Register in `server.go::routes()`. (2) TS api wrapper in `web/src/api/<name>.ts`
+  + re-export from `web/src/api/client.ts`; add a query key in `web/src/lib/query.ts`.
+  (3) Page in `web/src/pages/<Name>.tsx`; route in `web/src/App.tsx`; nav item in
+  `web/src/components/layout/nav.ts`. (4) Playwright spec in `web/e2e/<name>.spec.ts`
+  — the e2e gateway runs MEMORY backend with NO workers, so async-job endpoints
+  sit queued forever; spoof every endpoint via `page.route()` to drive the
+  queued→running→done state machine deterministically (pattern: reshard-progress.spec.ts).
+  GOTCHA: the console is `//go:embed all:web/dist` at COMPILE time — `pnpm build`
+  BEFORE running e2e (webServer does `go run` which re-embeds current dist).
+  GOTCHA: CSS `capitalize` is visual-only — DOM text stays lowercase, assert
+  `/running/` not `'Running'`. GOTCHA: hold the `running` state for several poll
+  cycles (2s each) in the mock so in-progress assertions aren't flaky.
+- Progress UX with no total/denominator (reshard, reconcile): the job endpoints
+  expose no row/chunk total, so there's NO honest %-complete. Surface the
+  server-backed signals instead — state (queued/running/done), live counters,
+  the resumable cursor watermark, elapsed clock — and an indeterminate animated
+  bar while running. `wasActive && state===done` renders the completion summary.
 
 ## 2026-06-02 - US-000 RADOS pool object-enumeration primitive
 - Implemented the foundation primitive for reconcile/rebuild: walk every object
@@ -450,4 +471,47 @@ Cycle: ralph/metadata-data-reconcile
     metrics.go:218-253. STRATA_RECONCILE_SCAN_RATE objects/sec, 0/unset =
     unlimited (enumerate.go ScanRateFromEnv). Worker enabled via
     STRATA_WORKERS=...,reconcile; "reconcile" in registeredWorkerNames:666.
+---
+
+## 2026-06-02 - US-006 Reconcile / rebuild surfaced in the web console
+- Surfaced reconcile in the operator console (Diagnostics → Reconcile) mirroring
+  the drain/reshard-progress UX: form picks the pass direction (orphan data→meta
+  / dangling meta→data) + a pass-scoped policy, queues a job (202), polls the
+  status endpoint, walks trigger → in-progress → complete + renders the post-run
+  summary. rebuild-index stays CLI-ONLY — a dedicated amber card documents the
+  deliberate choice + links to the runbook, no one-click destructive rebuild.
+- Backend: NEW cookie-authed `/admin/v1/reconcile` surface (the console cannot
+  sign the SigV4/IAM-root s3api `/admin/reconcile`). POST queues (orphan: cluster
+  +pool[+namespace]; dangling: bucket name → resolved to UUID), GET /{id} reads
+  status. Mirrors s3api adminReconcile logic + stamps audit admin:Reconcile.
+  restore policy → 400 (US-002b not shipped); gc rejected on dangling, quarantine
+  rejected on orphan (StartReconcile IsValid*Policy gates).
+- Files added:
+  - internal/adminapi/reconcile.go — ReconcileJSON wire shape, reconcilePostRequest,
+    handleReconcileStart (202), handleReconcileStatus (404 NoSuchReconcileJob).
+  - internal/adminapi/reconcile_test.go — 7 cases: orphan queue+poll, dangling
+    name→UUID resolve, orphan-needs-cluster/pool 400, restore-rejected 400,
+    dangling-rejects-gc 400, unknown-bucket 404, unknown-id 404.
+  - web/src/api/reconcile.ts — startReconcile/fetchReconcileJob + types.
+  - web/src/pages/Reconcile.tsx — page (form + ReconcileStatus + RebuildIndexCard).
+  - web/e2e/reconcile.spec.ts — 3 specs (orphan trigger→progress→summary,
+    dangling counters+policy picker, rebuild-index CLI-only runbook link).
+- Files changed:
+  - internal/adminapi/server.go — registered the 2 routes.
+  - web/src/api/client.ts — re-export reconcile api.
+  - web/src/lib/query.ts — queryKeys.reconcileJob(id).
+  - web/src/App.tsx — /diagnostics/reconcile route.
+  - web/src/components/layout/nav.ts — Diagnostics → Reconcile (Stethoscope icon).
+  - docs/site/content/operate/metadata-data-reconcile.md — console note block.
+- Quality: go build ./... OK; go vet ./internal/adminapi OK; adminapi tests OK
+  (incl. 7 new); web pnpm typecheck OK; pnpm test:unit 64/64; playwright
+  reconcile.spec.ts 3/3.
+- **Learnings for future iterations:**
+  - See the WEB CONSOLE wiring + no-denominator progress patterns added to
+    Codebase Patterns this iteration — they generalize the whole flow.
+  - The reconcile worker is NOT enabled in the e2e gateway; the spec mocks all
+    endpoints via page.route(). Real worker drain is covered by Go-side tests
+    (internal/reconcile + storetest contract), not the browser.
+  - runbook lives at /operate/metadata-data-reconcile/ (NOT /operate/reconcile/);
+    the rebuild-index card link target is REBUILD_RUNBOOK_URL in Reconcile.tsx.
 ---

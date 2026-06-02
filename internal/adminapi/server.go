@@ -560,6 +560,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET /admin/v1/gc-config", s.handleGetGCConfig)
 	mux.HandleFunc("GET /admin/v1/rebalance-config", s.handleGetRebalanceConfig)
 	mux.HandleFunc("GET /admin/v1/rebalance-bandwidth", s.handleGetRebalanceBandwidth)
+	mux.HandleFunc("POST /admin/v1/reconcile", s.handleReconcileStart)
+	mux.HandleFunc("GET /admin/v1/reconcile/{id}", s.handleReconcileStatus)
 	return mux
 }
 

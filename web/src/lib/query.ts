@@ -194,4 +194,7 @@ export const queryKeys = {
     ['clusters', 'drain-impact', id] as const,
   clusterDrainImpactPage: (id: string, limit: number, offset: number) =>
     ['clusters', 'drain-impact', id, { limit, offset }] as const,
+  // reconcile: a reconcile job polled to completion by the Reconcile page
+  // (US-006 metadata-data-reconcile). Keyed on the job id the POST returns.
+  reconcileJob: (id: string) => ['admin', 'reconcile', id] as const,
 };
