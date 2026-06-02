@@ -391,6 +391,12 @@ var tableDDL = []string{
 		orphans_report bigint,
 		absent_backref bigint,
 		errors         bigint,
+		bucket              text,
+		manifests_scanned   bigint,
+		healthy             bigint,
+		dangling_found      bigint,
+		dangling_quarantine bigint,
+		dangling_report     bigint,
 		created_at     timestamp,
 		updated_at     timestamp
 	)`,
@@ -480,6 +486,13 @@ var alterStatements = []string{
 	`ALTER TABLE buckets ADD signing_wrapped_dek blob`,
 	`ALTER TABLE buckets ADD signing_key_id text`,
 	`ALTER TABLE buckets ADD signing_key_created_at timestamp`,
+	`ALTER TABLE objects ADD quarantine_reason text`,
+	`ALTER TABLE reconcile_jobs ADD bucket text`,
+	`ALTER TABLE reconcile_jobs ADD manifests_scanned bigint`,
+	`ALTER TABLE reconcile_jobs ADD healthy bigint`,
+	`ALTER TABLE reconcile_jobs ADD dangling_found bigint`,
+	`ALTER TABLE reconcile_jobs ADD dangling_quarantine bigint`,
+	`ALTER TABLE reconcile_jobs ADD dangling_report bigint`,
 }
 
 func isColumnAlreadyExists(err error) bool {

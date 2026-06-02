@@ -19,7 +19,8 @@ import (
 const objectSelectCols = `version_id, is_latest, is_delete_marker, size, etag, content_type,
 	        storage_class, mtime, manifest, user_meta, tags,
 	        retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-	        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null`
+	        cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null,
+	        quarantine_reason`
 
 // MigrateReshardKey relocates every version row of key from its source shard
 // (fnv%active) to its target shard (fnv%target) for the in-flight reshard on
@@ -133,11 +134,13 @@ func (s *Store) scanAllVersionsAtShard(ctx context.Context, bucketID uuid.UUID, 
 			partSizes    []int64
 			checksumType string
 			isNull       bool
+			quarantine   string
 		)
 		if !iter.Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 			&class, &mtime, &manifestBlob, &userMeta, &tags,
 			&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull) {
+			&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull,
+			&quarantine) {
 			break
 		}
 		m, err := decodeManifest(manifestBlob)
@@ -175,6 +178,7 @@ func (s *Store) scanAllVersionsAtShard(ctx context.Context, bucketID uuid.UUID, 
 			PartSizes:         partSizes,
 			ReplicationStatus: replication,
 			ChecksumType:      checksumType,
+			QuarantineReason:  quarantine,
 		})
 	}
 	if err := iter.Close(); err != nil {
@@ -211,13 +215,15 @@ func (s *Store) insertObjectRowAtShard(ctx context.Context, shard int, key strin
 	const cols = `INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null,
+		 quarantine_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	args := []interface{}{
 		gocqlUUID(o.BucketID), shard, key, versionID, o.IsLatest, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
 		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus), partSizes, nilIfEmpty(o.ChecksumType), o.IsNull,
+		nilIfEmpty(o.QuarantineReason),
 	}
 	if !ifNotExists {
 		return true, s.s.Query(cols, args...).WithContext(ctx).Exec()

@@ -72,6 +72,7 @@ type objectRow struct {
 	Expires           string            `json:"x,omitempty"`
 	ReplicationStatus string            `json:"rps,omitempty"`
 	ChecksumType      string            `json:"cty,omitempty"`
+	QuarantineReason  string            `json:"qr,omitempty"`
 	// Grants is the per-object ACL blob. Carried as the raw JSON bytes
 	// produced by encodeGrants (mirrors Cassandra's `grants blob` column);
 	// empty length means "no grants persisted" and surfaces as
@@ -115,6 +116,7 @@ func encodeObject(o *meta.Object) ([]byte, error) {
 		Expires:           o.Expires,
 		ReplicationStatus: o.ReplicationStatus,
 		ChecksumType:      o.ChecksumType,
+		QuarantineReason:  o.QuarantineReason,
 	}
 	return json.Marshal(&row)
 }
@@ -442,5 +444,6 @@ func decodeObject(raw []byte) (*meta.Object, error) {
 		Expires:           row.Expires,
 		ReplicationStatus: row.ReplicationStatus,
 		ChecksumType:      row.ChecksumType,
+		QuarantineReason:  row.QuarantineReason,
 	}, nil
 }

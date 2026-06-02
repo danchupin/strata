@@ -90,6 +90,12 @@ var (
 	// ErrKMSKeyDenied — KMS authoritatively rejected the unwrap (wrong
 	// CMK ARN / IAM-policy deny). Operator must rotate to recover.
 	ErrKMSKeyDenied = APIError{Code: "KeyDenied", Message: "KMS denied unwrap of per-bucket signing key", Status: http.StatusUnauthorized}
+	// ErrObjectQuarantined — the reconcile dangling-manifest pass (US-003)
+	// marked this object version unreadable because a referenced data chunk is
+	// missing. A deterministic clear error instead of a silent corrupt 5xx
+	// from GetChunks; the operator restores the meta backup or runs
+	// rebuild-index. 503 so a client treats it as a server-side condition.
+	ErrObjectQuarantined = APIError{Code: "ObjectQuarantined", Message: "object quarantined by reconcile: a referenced data chunk is missing", Status: http.StatusServiceUnavailable}
 	// ErrKMSKeyTampered — wrapped-DEK HMAC mismatch on LocalHSMProvider
 	// (or equivalent integrity check on a future provider).
 	ErrKMSKeyTampered = APIError{Code: "KeyTampered", Message: "Per-bucket signing key wrapped DEK is corrupt", Status: http.StatusUnauthorized}

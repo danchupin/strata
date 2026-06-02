@@ -26,10 +26,14 @@ import (
 // StartReconcile queues a data-tier reconcile pass. A plain Set is safe
 // here: the id is a freshly minted UUID, so there is no concurrent
 // create-create race on the same key (unlike per-bucket reshard).
-func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, policy string) (_ *meta.ReconcileJob, err error) {
+func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, bucket, policy string) (_ *meta.ReconcileJob, err error) {
 	ctx, finish := s.observer.Start(ctx, "StartReconcile", "reconcile_jobs")
 	defer func() { finish(err) }()
-	if !meta.IsValidReconcilePolicy(policy) {
+	if bucket == "" {
+		if !meta.IsValidReconcilePolicy(policy) {
+			return nil, meta.ErrReconcileInvalidPolicy
+		}
+	} else if !meta.IsValidDanglingPolicy(policy) {
 		return nil, meta.ErrReconcileInvalidPolicy
 	}
 	now := time.Now().UTC()
@@ -38,6 +42,7 @@ func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, po
 		Cluster:   cluster,
 		Pool:      pool,
 		Namespace: namespace,
+		Bucket:    bucket,
 		Policy:    policy,
 		State:     meta.ReconcileStateQueued,
 		CreatedAt: now,

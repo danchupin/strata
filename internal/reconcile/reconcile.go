@@ -27,6 +27,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/meta"
 )
@@ -75,13 +77,29 @@ type ChunkScanner interface {
 type Observer interface {
 	ChunkScanned()
 	OrphanFound(resolution string)
+	// DanglingFound reports a dangling manifest resolved by resolution
+	// (report|quarantine) — the US-003 meta->data pass.
+	DanglingFound(resolution string)
 	ReconcileError()
+}
+
+// ChunkProber answers "does this chunk still exist in the data tier?" for the
+// dangling-manifest pass (US-003). It mirrors data.ChunkStater; the worker
+// takes the narrower interface so tests inject a fake without a data backend.
+// A nil Prober means the data backend cannot probe (e.g. a default-tag RADOS
+// build) — a dangling job then records an error and quarantines nothing.
+type ChunkProber interface {
+	ChunkExists(ctx context.Context, ref data.ChunkRef) (bool, error)
 }
 
 // Config wires a Worker.
 type Config struct {
 	Meta    meta.Store
 	Scanner ChunkScanner
+	// Prober answers chunk-existence for the dangling-manifest pass (US-003).
+	// Nil when the data backend cannot probe — a dangling job then errors and
+	// quarantines nothing.
+	Prober ChunkProber
 	// Region is the GC queue region passed to EnqueueChunkDeletion when the
 	// policy is gc. Mirrors the gc worker's deps.Region.
 	Region string
@@ -181,6 +199,11 @@ func (w *Worker) runJob(ctx context.Context, job *meta.ReconcileJob) error {
 			return fmt.Errorf("mark running: %w", err)
 		}
 	}
+	// Bucket set -> meta->data dangling-manifest pass (US-003); otherwise the
+	// data->meta orphan pass (US-002).
+	if job.Bucket != "" {
+		return w.runDanglingJob(ctx, job)
+	}
 	if w.cfg.Scanner == nil {
 		return errors.New("reconcile: no chunk scanner configured for this data backend")
 	}
@@ -273,6 +296,120 @@ func (w *Worker) classify(ctx context.Context, job *meta.ReconcileJob, c Scanned
 	return nil
 }
 
+// danglingListPageSize bounds one ListObjectVersions page in the dangling
+// walk. The walk is resumable per page via job.Cursor (the key marker), so a
+// small page is a fetch-granularity choice, never a truncation one.
+const danglingListPageSize = 500
+
+// runDanglingJob walks every object version in the job's bucket (meta->data)
+// and probes that each manifest-referenced chunk still exists in the data
+// tier. A version with a missing chunk is dangling and is resolved by the job
+// policy (report — count only; quarantine — mark the object unreadable so a
+// GET/HEAD returns a clear error instead of a silent corrupt 5xx). Resumes
+// from job.Cursor (the key marker) and persists progress every CheckpointEvery
+// manifests; writes a per-bucket summary on a clean drain.
+func (w *Worker) runDanglingJob(ctx context.Context, job *meta.ReconcileJob) error {
+	if w.cfg.Prober == nil {
+		return errors.New("reconcile: no chunk prober configured for this data backend (dangling pass unsupported)")
+	}
+	bucketID, err := uuid.Parse(job.Bucket)
+	if err != nil {
+		return fmt.Errorf("parse bucket %q: %w", job.Bucket, err)
+	}
+	sinceCheckpoint := 0
+	marker := job.Cursor
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		res, err := w.cfg.Meta.ListObjectVersions(ctx, bucketID, meta.ListOptions{
+			Marker: marker,
+			Limit:  danglingListPageSize,
+		})
+		if err != nil {
+			_ = w.cfg.Meta.UpdateReconcileJob(ctx, job)
+			return fmt.Errorf("list object versions: %w", err)
+		}
+		for _, obj := range res.Versions {
+			if err := w.classifyDangling(ctx, job, obj); err != nil {
+				_ = w.cfg.Meta.UpdateReconcileJob(ctx, job)
+				return err
+			}
+			sinceCheckpoint++
+			if sinceCheckpoint >= w.cfg.CheckpointEvery {
+				sinceCheckpoint = 0
+				if err := w.cfg.Meta.UpdateReconcileJob(ctx, job); err != nil {
+					return fmt.Errorf("checkpoint: %w", err)
+				}
+			}
+		}
+		if !res.Truncated {
+			break
+		}
+		marker = res.NextKeyMarker
+		job.Cursor = marker
+	}
+	job.State = meta.ReconcileStateDone
+	job.Message = ""
+	if err := w.cfg.Meta.UpdateReconcileJob(ctx, job); err != nil {
+		return fmt.Errorf("mark done: %w", err)
+	}
+	w.cfg.Logger.InfoContext(ctx, "reconcile dangling summary",
+		"job", job.ID, "bucket", job.Bucket, "policy", job.Policy,
+		"manifests_scanned", job.ManifestsScanned, "healthy", job.Healthy,
+		"dangling", job.DanglingFound, "dangling_quarantine", job.DanglingQuarantine,
+		"dangling_report", job.DanglingReport, "errors", job.Errors)
+	return nil
+}
+
+// classifyDangling probes obj's manifest chunks and resolves a dangling
+// manifest by the job policy. Mutates the job's in-memory counters.
+func (w *Worker) classifyDangling(ctx context.Context, job *meta.ReconcileJob, obj *meta.Object) error {
+	job.ManifestsScanned++
+	// Delete markers, backend-ref objects, and zero-chunk manifests carry no
+	// data-tier chunks to probe — never dangling.
+	if obj.IsDeleteMarker || obj.Manifest == nil || len(obj.Manifest.Chunks) == 0 {
+		job.Healthy++
+		return nil
+	}
+	missing := false
+	for _, ch := range obj.Manifest.Chunks {
+		ok, err := w.cfg.Prober.ChunkExists(ctx, ch)
+		if err != nil {
+			// Uncertain (transient probe error): never quarantine on doubt.
+			job.Errors++
+			w.cfg.Obs.ReconcileError()
+			return nil
+		}
+		if !ok {
+			missing = true
+			break
+		}
+	}
+	if !missing {
+		job.Healthy++
+		return nil
+	}
+	job.DanglingFound++
+	switch job.Policy {
+	case meta.ReconcilePolicyQuarantine:
+		reason := "reconcile: referenced data chunk missing (dangling manifest)"
+		if err := w.cfg.Meta.SetObjectQuarantine(ctx, obj.BucketID, obj.Key, obj.VersionID, reason); err != nil {
+			// Quarantine write failed: dangling found but not resolved. Count
+			// an error; a re-run re-detects and re-quarantines (idempotent).
+			job.Errors++
+			w.cfg.Obs.ReconcileError()
+			return nil
+		}
+		job.DanglingQuarantine++
+		w.cfg.Obs.DanglingFound(meta.ReconcilePolicyQuarantine)
+	default: // report (the safe default — count only, no mutation)
+		job.DanglingReport++
+		w.cfg.Obs.DanglingFound(meta.ReconcilePolicyReport)
+	}
+	return nil
+}
+
 // manifestReferencesOID reports whether m references the chunk OID. A nil
 // manifest (delete marker, or an S3-backend BackendRef object with no native
 // chunks) references no chunk OID.
@@ -290,6 +427,7 @@ func manifestReferencesOID(m *data.Manifest, oid string) bool {
 
 type nopObserver struct{}
 
-func (nopObserver) ChunkScanned()      {}
-func (nopObserver) OrphanFound(string) {}
-func (nopObserver) ReconcileError()    {}
+func (nopObserver) ChunkScanned()        {}
+func (nopObserver) OrphanFound(string)   {}
+func (nopObserver) DanglingFound(string) {}
+func (nopObserver) ReconcileError()      {}

@@ -101,6 +101,17 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 
 func (b *Backend) Close() error { return nil }
 
+// ChunkExists implements data.ChunkStater: reports whether the chunk OID is
+// held by the backend. Drives the reconcile dangling-manifest pass (US-003).
+func (b *Backend) ChunkExists(ctx context.Context, ref data.ChunkRef) (bool, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	_, ok := b.chunks[ref.OID]
+	return ok, nil
+}
+
+var _ data.ChunkStater = (*Backend)(nil)
+
 // ClusterECCapability satisfies data.ClusterECCapability. The memory
 // backend has no underlying erasure-coded pool, so every cluster is
 // reported as replicated (US-007 EC-aware manifests).

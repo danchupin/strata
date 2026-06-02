@@ -14,13 +14,19 @@ import (
 // id partition key), kept in lockstep with the INSERT in StartReconcile and
 // the Scan order in scanReconcileJob / ListReconcileJobs.
 const reconcileJobCols = `cluster, pool, namespace, policy, cursor, state, message,
-	scanned, orphans_found, orphans_gc, orphans_report, absent_backref, errors, created_at, updated_at`
+	scanned, orphans_found, orphans_gc, orphans_report, absent_backref, errors,
+	bucket, manifests_scanned, healthy, dangling_found, dangling_quarantine, dangling_report,
+	created_at, updated_at`
 
 // StartReconcile inserts a fresh reconcile_jobs row. A plain INSERT (no LWT) is
 // safe: the id is a freshly minted UUID so there is no create-create race on
 // the key — unlike the per-bucket reshard singleton.
-func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, policy string) (*meta.ReconcileJob, error) {
-	if !meta.IsValidReconcilePolicy(policy) {
+func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, bucket, policy string) (*meta.ReconcileJob, error) {
+	if bucket == "" {
+		if !meta.IsValidReconcilePolicy(policy) {
+			return nil, meta.ErrReconcileInvalidPolicy
+		}
+	} else if !meta.IsValidDanglingPolicy(policy) {
 		return nil, meta.ErrReconcileInvalidPolicy
 	}
 	now := time.Now().UTC()
@@ -29,6 +35,7 @@ func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, po
 		Cluster:   cluster,
 		Pool:      pool,
 		Namespace: namespace,
+		Bucket:    bucket,
 		Policy:    policy,
 		State:     meta.ReconcileStateQueued,
 		CreatedAt: now,
@@ -36,9 +43,10 @@ func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, po
 	}
 	if err := s.s.Query(
 		`INSERT INTO reconcile_jobs (id, `+reconcileJobCols+`)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		job.ID, job.Cluster, job.Pool, job.Namespace, job.Policy, job.Cursor, job.State, job.Message,
 		job.Scanned, job.OrphansFound, job.OrphansGC, job.OrphansReport, job.AbsentBackref, job.Errors,
+		job.Bucket, job.ManifestsScanned, job.Healthy, job.DanglingFound, job.DanglingQuarantine, job.DanglingReport,
 		job.CreatedAt, job.UpdatedAt,
 	).WithContext(ctx).Exec(); err != nil {
 		return nil, err
@@ -60,9 +68,13 @@ func (s *Store) UpdateReconcileJob(ctx context.Context, job *meta.ReconcileJob) 
 	now := time.Now().UTC()
 	applied, err := s.s.Query(
 		`UPDATE reconcile_jobs SET cursor=?, state=?, message=?, scanned=?, orphans_found=?,
-		 orphans_gc=?, orphans_report=?, absent_backref=?, errors=?, updated_at=? WHERE id=? IF EXISTS`,
+		 orphans_gc=?, orphans_report=?, absent_backref=?, errors=?,
+		 manifests_scanned=?, healthy=?, dangling_found=?, dangling_quarantine=?, dangling_report=?,
+		 updated_at=? WHERE id=? IF EXISTS`,
 		job.Cursor, job.State, job.Message, job.Scanned, job.OrphansFound,
-		job.OrphansGC, job.OrphansReport, job.AbsentBackref, job.Errors, now, job.ID,
+		job.OrphansGC, job.OrphansReport, job.AbsentBackref, job.Errors,
+		job.ManifestsScanned, job.Healthy, job.DanglingFound, job.DanglingQuarantine, job.DanglingReport,
+		now, job.ID,
 	).WithContext(ctx).SerialConsistency(gocql.LocalSerial).ScanCAS(nil)
 	if err != nil {
 		return err
@@ -118,28 +130,39 @@ func scanReconcileRow(iter *gocql.Iter) (*meta.ReconcileJob, bool) {
 		id, cluster, pool, namespace, policy, cursor, state, message string
 		scanned, orphansFound, orphansGC, orphansReport              int64
 		absentBackref, errs                                          int64
+		bucket                                                       string
+		manifestsScanned, healthy                                    int64
+		danglingFound, danglingQuarantine, danglingReport            int64
 		createdAt, updatedAt                                         time.Time
 	)
 	if !iter.Scan(&id, &cluster, &pool, &namespace, &policy, &cursor, &state, &message,
-		&scanned, &orphansFound, &orphansGC, &orphansReport, &absentBackref, &errs, &createdAt, &updatedAt) {
+		&scanned, &orphansFound, &orphansGC, &orphansReport, &absentBackref, &errs,
+		&bucket, &manifestsScanned, &healthy, &danglingFound, &danglingQuarantine, &danglingReport,
+		&createdAt, &updatedAt) {
 		return nil, false
 	}
 	return &meta.ReconcileJob{
-		ID:            id,
-		Cluster:       cluster,
-		Pool:          pool,
-		Namespace:     namespace,
-		Policy:        policy,
-		Cursor:        cursor,
-		State:         state,
-		Message:       message,
-		Scanned:       scanned,
-		OrphansFound:  orphansFound,
-		OrphansGC:     orphansGC,
-		OrphansReport: orphansReport,
-		AbsentBackref: absentBackref,
-		Errors:        errs,
-		CreatedAt:     createdAt,
-		UpdatedAt:     updatedAt,
+		ID:                 id,
+		Cluster:            cluster,
+		Pool:               pool,
+		Namespace:          namespace,
+		Bucket:             bucket,
+		Policy:             policy,
+		Cursor:             cursor,
+		State:              state,
+		Message:            message,
+		Scanned:            scanned,
+		OrphansFound:       orphansFound,
+		OrphansGC:          orphansGC,
+		OrphansReport:      orphansReport,
+		AbsentBackref:      absentBackref,
+		Errors:             errs,
+		ManifestsScanned:   manifestsScanned,
+		Healthy:            healthy,
+		DanglingFound:      danglingFound,
+		DanglingQuarantine: danglingQuarantine,
+		DanglingReport:     danglingReport,
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
 	}, true
 }

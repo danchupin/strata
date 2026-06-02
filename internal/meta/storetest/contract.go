@@ -60,6 +60,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"NonDefaultShardRoundTrip", caseNonDefaultShardRoundTrip},
 		{"SampleBucketShardStats", caseSampleBucketShardStats},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
+		{"ObjectQuarantineRoundTrip", caseObjectQuarantine},
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
 		{"ReconcileJobRoundTrip", caseReconcileJobRoundTrip},
 		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
@@ -782,6 +783,68 @@ func caseSSEWrapRotation(t *testing.T, s meta.Store) {
 	prog, err := s.GetRewrapProgress(ctx, b.ID)
 	if err != nil || !prog.Complete || prog.TargetID != "B" || prog.LastKey != "k" {
 		t.Fatalf("progress: %+v err=%v", prog, err)
+	}
+}
+
+// caseObjectQuarantine exercises SetObjectQuarantine (US-003): set a reason ->
+// GetObject reflects it; clear ("") -> back to healthy. Backend parity for the
+// dangling-manifest pass's resolution path.
+func caseObjectQuarantine(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "quarantine", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	o := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "k",
+		StorageClass: "STANDARD",
+		ETag:         "deadbeef",
+		Size:         5,
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Class: "STANDARD"},
+	}
+	if err := s.PutObject(ctx, o, false); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// Healthy by default.
+	got, err := s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.QuarantineReason != "" {
+		t.Fatalf("fresh object quarantined: %q", got.QuarantineReason)
+	}
+
+	// Quarantine sets the reason.
+	const reason = "reconcile: referenced data chunk missing (dangling manifest)"
+	if err := s.SetObjectQuarantine(ctx, b.ID, "k", "", reason); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get after quarantine: %v", err)
+	}
+	if got.QuarantineReason != reason {
+		t.Fatalf("quarantine reason: got %q want %q", got.QuarantineReason, reason)
+	}
+
+	// Clearing restores health.
+	if err := s.SetObjectQuarantine(ctx, b.ID, "k", "", ""); err != nil {
+		t.Fatalf("clear quarantine: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get after clear: %v", err)
+	}
+	if got.QuarantineReason != "" {
+		t.Fatalf("quarantine not cleared: %q", got.QuarantineReason)
+	}
+
+	// Missing object surfaces ErrObjectNotFound.
+	if err := s.SetObjectQuarantine(ctx, b.ID, "nope", "", reason); err != meta.ErrObjectNotFound {
+		t.Fatalf("quarantine missing: got %v want ErrObjectNotFound", err)
 	}
 }
 
@@ -2512,14 +2575,52 @@ func caseReconcileJobRoundTrip(t *testing.T, s meta.Store) {
 	ctx := context.Background()
 
 	// restore is a recognised constant but not yet supported (US-002b).
-	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", meta.ReconcilePolicyRestore); err != meta.ErrReconcileInvalidPolicy {
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyRestore); err != meta.ErrReconcileInvalidPolicy {
 		t.Errorf("restore policy: got %v want ErrReconcileInvalidPolicy", err)
 	}
-	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "bogus"); err != meta.ErrReconcileInvalidPolicy {
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", "bogus"); err != meta.ErrReconcileInvalidPolicy {
 		t.Errorf("bogus policy: got %v want ErrReconcileInvalidPolicy", err)
 	}
+	// quarantine is a dangling-only policy — invalid for an orphan (no-bucket) job.
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyQuarantine); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("quarantine on orphan job: got %v want ErrReconcileInvalidPolicy", err)
+	}
+	// gc is an orphan-only policy — invalid for a dangling (bucket-set) job.
+	if _, err := s.StartReconcile(ctx, "", "", "", "bkt-uuid", meta.ReconcilePolicyGC); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("gc on dangling job: got %v want ErrReconcileInvalidPolicy", err)
+	}
 
-	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "cls-cold", meta.ReconcilePolicyReport)
+	// A dangling (bucket-scoped) job round-trips its counters + accepts quarantine.
+	dj, err := s.StartReconcile(ctx, "", "", "", "bkt-uuid", meta.ReconcilePolicyQuarantine)
+	if err != nil {
+		t.Fatalf("start dangling: %v", err)
+	}
+	if dj.Bucket != "bkt-uuid" || dj.Policy != meta.ReconcilePolicyQuarantine {
+		t.Fatalf("dangling start round-trip: %+v", dj)
+	}
+	dj.State = meta.ReconcileStateRunning
+	dj.ManifestsScanned = 50
+	dj.Healthy = 47
+	dj.DanglingFound = 3
+	dj.DanglingQuarantine = 3
+	dj.DanglingReport = 0
+	if err := s.UpdateReconcileJob(ctx, dj); err != nil {
+		t.Fatalf("update dangling: %v", err)
+	}
+	gotDJ, err := s.GetReconcileJob(ctx, dj.ID)
+	if err != nil {
+		t.Fatalf("get dangling: %v", err)
+	}
+	if gotDJ.Bucket != "bkt-uuid" || gotDJ.ManifestsScanned != 50 || gotDJ.Healthy != 47 ||
+		gotDJ.DanglingFound != 3 || gotDJ.DanglingQuarantine != 3 {
+		t.Fatalf("dangling counter round-trip: %+v", gotDJ)
+	}
+	gotDJ.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, gotDJ); err != nil {
+		t.Fatalf("complete dangling: %v", err)
+	}
+
+	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "cls-cold", "", meta.ReconcilePolicyReport)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}

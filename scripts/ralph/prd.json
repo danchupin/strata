@@ -89,8 +89,25 @@
         "Tests pass"
       ],
       "priority": 4,
+      "passes": true,
+      "notes": "Core shipped: dangling-manifest DETECTION (meta->data) as the inverse direction of US-002. ReconcileJob is now bidirectional, discriminated by job.Bucket (empty = orphan pool pass; non-empty = dangling bucket pass) — additive Bucket + dangling counters (ManifestsScanned/Healthy/DanglingFound/DanglingQuarantine/DanglingReport) across all 3 backends (TiKV+memory ride the JSON/struct free; Cassandra reconcile_jobs got 6 columns + DDL/alter/INSERT/UPDATE/scan lockstep). StartReconcile signature grew a bucket param; meta.IsValidDanglingPolicy gates report|quarantine (orphan stays report|gc). Worker.runDanglingJob walks ListObjectVersions paginated (resumable from Cursor=key marker), probes each Manifest.Chunks OID via reconcile.ChunkProber (mirrors NEW data.ChunkStater; memory data backend implements ChunkExists; default-tag RADOS -> nil prober -> job error, quarantines nothing). Resolution: report (DEFAULT, count only) + quarantine (SetObjectQuarantine sets Object.QuarantineReason; getObject GET/HEAD returns 503 ObjectQuarantined instead of silent corrupt 5xx). Quarantine persisted as a single Object.QuarantineReason column (mirrors RestoreStatus; NOT manifest blob -> avoids protoc regen) threaded through cassandra objectSelectCols + reshard + dedicated SetObjectQuarantine UPDATE; tikv objectRow + codec; memory free. Metric strata_reconcile_dangling_manifests_total{resolution} + ReconcileObserver.DanglingFound. Per-bucket summary log on clean drain. Admin POST /admin/reconcile?bucket=&policy= resolves name->ID + queues; response gained bucket + dangling fields. Red/green on memory (fakeProber): dangling quarantined + healthy untouched; report counts no mutation; probe error never quarantines (no destroy on doubt); nil prober -> job error. storetest caseObjectQuarantine + dangling-job round-trip + policy cross-validation. SPLIT to US-003b: delete resolution (IsValidDanglingPolicy accepts only report|quarantine today) + the real RADOS/S3 ChunkProber (cephimpl per-OID stat). ROADMAP Known-latent US-003-split entry added."
+    },
+    {
+      "id": "US-003b",
+      "title": "Reconcile dangling delete resolution + RADOS/S3 chunk prober (trailing split)",
+      "description": "As an operator, I want the dangling-manifest pass to optionally DELETE a broken object (not just quarantine) and to actually run against the RADOS + S3-passthrough data backends. SPLIT from US-003 because the detection + report + quarantine logic ships CI-green on the memory backend via an injected fake prober, while the real per-OID existence probe is backend-specific (cephimpl stat / S3 HEAD) and integration-only, and the delete resolution needs the same GC-enqueue + object-row-delete care as US-002 gc.",
+      "acceptanceCriteria": [
+        "meta.IsValidDanglingPolicy accepts delete; the worker resolves a dangling manifest under delete policy by enqueuing the object's surviving chunks for GC and deleting the object row (mirrors US-002 gc care — never double-delete, dual-write _by_cluster lookup stays in lockstep)",
+        "cephimpl implements data.ChunkStater (a per-OID rados stat riding an ioctx); the S3-passthrough backend implements it via a native HEAD on the backing object; chunkProber() in the worker wiring picks them up so a dangling job runs against the real backends",
+        "Rate-limited probe (reuse STRATA_RECONCILE_SCAN_RATE) so a live-cluster dangling walk does not saturate OSDs",
+        "Red/green proof: seed objects on the real RADOS backend, delete a chunk under one manifest, run the dangling pass -> that object reported dangling and quarantined (report mode counts; delete mode removes); a healthy object untouched",
+        "make vet passes; memory + TiKV storetest contract; RADOS + S3-backend legs under integration",
+        "ROADMAP 'Known latent bugs' US-003-split entry closed in the same commit",
+        "Tests pass"
+      ],
+      "priority": 11,
       "passes": false,
-      "notes": ""
+      "notes": "Trailing split from US-003 (detection + report + quarantine shipped on memory). Pick up after the core reconcile/rebuild line; the cephimpl ChunkStater stat is integration-only like the US-002 RADOSScanner WithBackref read."
     },
     {
       "id": "US-004",

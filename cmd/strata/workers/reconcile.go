@@ -8,6 +8,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/rados"
 	"github.com/danchupin/strata/internal/metrics"
 	"github.com/danchupin/strata/internal/reconcile"
@@ -18,6 +19,16 @@ func init() {
 		Name:  "reconcile",
 		Build: buildReconcile,
 	})
+}
+
+// chunkProber returns the data backend as a reconcile.ChunkProber when it can
+// answer chunk-existence (data.ChunkStater), else nil. nil disables the
+// dangling pass for that backend (US-003b wires the RADOS leg).
+func chunkProber(d data.Backend) reconcile.ChunkProber {
+	if st, ok := d.(data.ChunkStater); ok {
+		return st
+	}
+	return nil
 }
 
 func buildReconcile(deps Dependencies) (Runner, error) {
@@ -35,6 +46,12 @@ func buildReconcile(deps Dependencies) (Runner, error) {
 			Backend:    deps.Data,
 			RatePerSec: rados.ScanRateFromEnv(),
 		},
+		// Prober drives the US-003 dangling-manifest pass (meta->data). The
+		// memory backend implements data.ChunkStater directly; a default-tag
+		// RADOS build does not (the per-OID stat is the US-003b split), so a
+		// dangling job there records an error and quarantines nothing — it
+		// never flags a healthy object on a probe it could not run.
+		Prober:          chunkProber(deps.Data),
 		Region:          deps.Region,
 		Logger:          deps.Logger,
 		Obs:             metrics.ReconcileObserver{},

@@ -94,7 +94,7 @@ func runJobWith(t *testing.T, s *memory.Store, scanner ChunkScanner, region, pol
 	if err != nil {
 		t.Fatalf("new worker: %v", err)
 	}
-	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", policy)
+	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", policy)
 	if err != nil {
 		t.Fatalf("start reconcile: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestReconcileResumesFromCursor(t *testing.T) {
 	s, bid := seed(t)
 	ctx := context.Background()
 	w, _ := New(Config{Meta: s, Scanner: &fakeScanner{chunks: chunkSet(bid)}, Region: "us"})
-	job, _ := s.StartReconcile(ctx, "ceph-a", "strata-data", "", meta.ReconcilePolicyReport)
+	job, _ := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyReport)
 	if _, err := w.RunOnce(ctx); err != nil {
 		t.Fatalf("run once: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestReconcileResumesFromCursor(t *testing.T) {
 	// forwards job.Cursor (here empty for a new job).
 	fresh := &fakeScanner{chunks: chunkSet(bid)}
 	w2, _ := New(Config{Meta: s, Scanner: fresh, Region: "us"})
-	j2, _ := s.StartReconcile(ctx, "ceph-a", "strata-data", "", meta.ReconcilePolicyReport)
+	j2, _ := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyReport)
 	_, _ = w2.RunOnce(ctx)
 	_ = j2
 	if fresh.gotCursor != "" {
@@ -240,7 +240,7 @@ func TestReconcileScanErrorMarksJobError(t *testing.T) {
 	ctx := context.Background()
 	scanner := &fakeScanner{chunks: chunkSet(bid)[:1], err: context.DeadlineExceeded}
 	w, _ := New(Config{Meta: s, Scanner: scanner, Region: "us"})
-	job, _ := s.StartReconcile(ctx, "ceph-a", "strata-data", "", meta.ReconcilePolicyReport)
+	job, _ := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyReport)
 	if _, err := w.RunOnce(ctx); err != nil {
 		t.Fatalf("run once should not surface a per-job error: %v", err)
 	}
@@ -259,8 +259,172 @@ func TestReconcileInvalidPolicyRejected(t *testing.T) {
 	s := memory.New()
 	ctx := context.Background()
 	for _, p := range []string{meta.ReconcilePolicyRestore, "bogus", ""} {
-		if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", p); err != meta.ErrReconcileInvalidPolicy {
+		if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", p); err != meta.ErrReconcileInvalidPolicy {
 			t.Errorf("policy %q: got %v want ErrReconcileInvalidPolicy", p, err)
 		}
+	}
+}
+
+// fakeProber answers ChunkExists from a fixed OID set — a chunk OID not in the
+// set is treated as missing (the dangling-manifest condition). err, when set,
+// is returned (transient probe failure -> never quarantine on doubt).
+type fakeProber struct {
+	present map[string]bool
+	err     error
+}
+
+func (f *fakeProber) ChunkExists(ctx context.Context, ref data.ChunkRef) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.present[ref.OID], nil
+}
+
+// seedDangling extends seed() with a second object ("broken-key") whose
+// manifest references a chunk OID the prober will report missing — the
+// dangling-manifest condition. Returns the store, bucket id, and a prober that
+// holds only live-key's chunk.
+func seedDangling(t *testing.T) (*memory.Store, uuid.UUID, *fakeProber) {
+	t.Helper()
+	s, bid := seed(t)
+	ctx := context.Background()
+	broken := &meta.Object{
+		BucketID:     bid,
+		Key:          "broken-key",
+		StorageClass: "STANDARD",
+		ETag:         "etag2",
+		Mtime:        time.Unix(1700000002, 0).UTC(),
+		Size:         4,
+		Manifest: &data.Manifest{
+			Class: "STANDARD",
+			Size:  4,
+			Chunks: []data.ChunkRef{
+				{Cluster: "ceph-a", Pool: "strata-data", OID: "missing-uuid.00000", Size: 4},
+			},
+		},
+	}
+	if err := s.PutObject(ctx, broken, false); err != nil {
+		t.Fatalf("put broken object: %v", err)
+	}
+	// Prober holds live-key's chunk but NOT broken-key's.
+	return s, bid, &fakeProber{present: map[string]bool{"live-uuid.00000": true}}
+}
+
+func runDanglingJob(t *testing.T, s *memory.Store, prober ChunkProber, bid uuid.UUID, policy string) *meta.ReconcileJob {
+	t.Helper()
+	ctx := context.Background()
+	w, err := New(Config{Meta: s, Prober: prober})
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	job, err := s.StartReconcile(ctx, "", "", "", bid.String(), policy)
+	if err != nil {
+		t.Fatalf("start dangling reconcile: %v", err)
+	}
+	if _, err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	got, err := s.GetReconcileJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	return got
+}
+
+// TestReconcileDanglingQuarantine is the US-003 red/green: a manifest whose
+// chunk is missing is detected dangling and the object is quarantined so a GET
+// returns a clear error; the healthy object is untouched.
+func TestReconcileDanglingQuarantine(t *testing.T) {
+	s, bid, prober := seedDangling(t)
+	ctx := context.Background()
+	got := runDanglingJob(t, s, prober, bid, meta.ReconcilePolicyQuarantine)
+
+	if got.State != meta.ReconcileStateDone {
+		t.Fatalf("state: got %q want done", got.State)
+	}
+	if got.ManifestsScanned != 2 {
+		t.Errorf("manifests_scanned: got %d want 2", got.ManifestsScanned)
+	}
+	if got.Healthy != 1 {
+		t.Errorf("healthy: got %d want 1", got.Healthy)
+	}
+	if got.DanglingFound != 1 || got.DanglingQuarantine != 1 {
+		t.Errorf("dangling: found=%d quarantine=%d want 1/1", got.DanglingFound, got.DanglingQuarantine)
+	}
+
+	// The broken object is quarantined; the healthy one is not.
+	broken, err := s.GetObject(ctx, bid, "broken-key", "")
+	if err != nil {
+		t.Fatalf("get broken: %v", err)
+	}
+	if broken.QuarantineReason == "" {
+		t.Errorf("broken-key not quarantined")
+	}
+	live, err := s.GetObject(ctx, bid, "live-key", "")
+	if err != nil {
+		t.Fatalf("get live: %v", err)
+	}
+	if live.QuarantineReason != "" {
+		t.Errorf("healthy live-key wrongly quarantined: %q", live.QuarantineReason)
+	}
+}
+
+// TestReconcileDanglingReport proves the DEFAULT report policy counts the
+// dangling manifest but mutates NOTHING — the object is not quarantined.
+func TestReconcileDanglingReport(t *testing.T) {
+	s, bid, prober := seedDangling(t)
+	ctx := context.Background()
+	got := runDanglingJob(t, s, prober, bid, meta.ReconcilePolicyReport)
+
+	if got.DanglingFound != 1 || got.DanglingReport != 1 || got.DanglingQuarantine != 0 {
+		t.Errorf("dangling: found=%d report=%d quarantine=%d want 1/1/0",
+			got.DanglingFound, got.DanglingReport, got.DanglingQuarantine)
+	}
+	broken, err := s.GetObject(ctx, bid, "broken-key", "")
+	if err != nil {
+		t.Fatalf("get broken: %v", err)
+	}
+	if broken.QuarantineReason != "" {
+		t.Errorf("report policy must not quarantine: %q", broken.QuarantineReason)
+	}
+}
+
+// TestReconcileDanglingProbeErrorNeverQuarantines proves a transient probe
+// error counts as an error and quarantines nothing — never destroy/flag on
+// doubt.
+func TestReconcileDanglingProbeErrorNeverQuarantines(t *testing.T) {
+	s, bid, _ := seedDangling(t)
+	ctx := context.Background()
+	prober := &fakeProber{err: context.DeadlineExceeded}
+	got := runDanglingJob(t, s, prober, bid, meta.ReconcilePolicyQuarantine)
+
+	if got.DanglingQuarantine != 0 {
+		t.Errorf("quarantine on probe error: got %d want 0", got.DanglingQuarantine)
+	}
+	if got.Errors == 0 {
+		t.Errorf("probe error should be counted")
+	}
+	broken, err := s.GetObject(ctx, bid, "broken-key", "")
+	if err != nil {
+		t.Fatalf("get broken: %v", err)
+	}
+	if broken.QuarantineReason != "" {
+		t.Errorf("must not quarantine on probe error: %q", broken.QuarantineReason)
+	}
+}
+
+// TestReconcileDanglingNoProber proves a dangling job with no prober wired
+// (default-tag RADOS) is marked error and quarantines nothing.
+func TestReconcileDanglingNoProber(t *testing.T) {
+	s, bid, _ := seedDangling(t)
+	ctx := context.Background()
+	w, _ := New(Config{Meta: s}) // no Prober
+	job, _ := s.StartReconcile(ctx, "", "", "", bid.String(), meta.ReconcilePolicyQuarantine)
+	if _, err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("run once should not surface a per-job error: %v", err)
+	}
+	got, _ := s.GetReconcileJob(ctx, job.ID)
+	if got.State != meta.ReconcileStateError {
+		t.Errorf("state: got %q want error", got.State)
 	}
 }

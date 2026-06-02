@@ -1187,6 +1187,14 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		writeError(w, r, ErrMethodNotAllowed)
 		return
 	}
+	if o.QuarantineReason != "" {
+		// US-003: the reconcile dangling-manifest pass marked this version
+		// unreadable (a referenced data chunk is missing). Return a clear
+		// error on both GET and HEAD instead of a silent corrupt 5xx from
+		// GetChunks — getObject serves both.
+		writeError(w, r, ErrObjectQuarantined)
+		return
+	}
 	partNumberStr := q.Get("partNumber")
 	var (
 		partNumber int

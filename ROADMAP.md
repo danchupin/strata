@@ -653,6 +653,15 @@ Non-goals:
   `ErrReconcileInvalidPolicy` until then; (2) the S3-passthrough backend's native-`ListObjects` chunk scanner (the
   RADOS leg is wired + CI-integration-tested; the S3 leg reuses the same `ChunkScanner` seam). Tracked as the trailing
   `US-002b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-002)
+- **P3 — Reconcile dangling-manifest `delete` resolution + RADOS/S3 chunk prober deferred (US-003 split).** The
+  reconcile worker now ships the meta→data dangling-manifest pass (US-003): a bucket-scoped job walks every object
+  version's manifest and probes each chunk via `reconcile.ChunkProber` (`data.ChunkStater`), resolving a dangling
+  manifest by the `report` (default — count only) or `quarantine` (mark the object unreadable so a GET/HEAD returns
+  `503 ObjectQuarantined` instead of a silent corrupt 5xx) policy. Two pieces are split out: (1) the `delete`
+  resolution (`meta.IsValidDanglingPolicy` accepts only `report|quarantine` today); (2) the real chunk prober for the
+  RADOS + S3-passthrough backends — only the memory backend implements `data.ChunkStater` so far (CI-green via the
+  injected fake prober), so a dangling job against a default-tag RADOS build records an error and quarantines nothing
+  (never flags a healthy object on a probe it could not run). Tracked as `US-003b` (to add). (`ralph/metadata-data-reconcile` US-003)
 - **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
   reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
   the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but

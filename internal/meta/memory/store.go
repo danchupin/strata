@@ -1442,6 +1442,19 @@ func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, 
 	return nil
 }
 
+// SetObjectQuarantine sets (reason != "") or clears (reason == "") the
+// object's QuarantineReason (US-003 dangling-manifest pass).
+func (s *Store) SetObjectQuarantine(ctx context.Context, bucketID uuid.UUID, key, versionID, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.findLatest(bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	o.QuarantineReason = reason
+	return nil
+}
+
 func (s *Store) SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -2984,8 +2997,12 @@ func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error)
 	return out, nil
 }
 
-func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, policy string) (*meta.ReconcileJob, error) {
-	if !meta.IsValidReconcilePolicy(policy) {
+func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, bucket, policy string) (*meta.ReconcileJob, error) {
+	if bucket == "" {
+		if !meta.IsValidReconcilePolicy(policy) {
+			return nil, meta.ErrReconcileInvalidPolicy
+		}
+	} else if !meta.IsValidDanglingPolicy(policy) {
 		return nil, meta.ErrReconcileInvalidPolicy
 	}
 	now := time.Now().UTC()
@@ -2994,6 +3011,7 @@ func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, po
 		Cluster:   cluster,
 		Pool:      pool,
 		Namespace: namespace,
+		Bucket:    bucket,
 		Policy:    policy,
 		State:     meta.ReconcileStateQueued,
 		CreatedAt: now,

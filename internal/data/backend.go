@@ -13,6 +13,19 @@ type Backend interface {
 	Close() error
 }
 
+// ChunkStater is the optional capability a data backend advertises to answer
+// "does this chunk OID still exist in the data tier?". The reconcile worker's
+// dangling-manifest pass (US-003, meta->data) probes every manifest-referenced
+// chunk through it: a manifest whose chunk is missing is dangling. Backends
+// that cannot answer cheaply do not implement it; the reconcile worker then
+// records that the probe is unsupported and quarantines nothing (it must never
+// flag a healthy object dangling on a probe it could not run). The memory
+// backend implements it directly; the RADOS leg (a per-OID stat) is the
+// trailing US-003b split.
+type ChunkStater interface {
+	ChunkExists(ctx context.Context, ref ChunkRef) (bool, error)
+}
+
 // MultipartBackend is the optional capability surface for data backends that
 // can map a Strata multipart upload 1:1 onto their own multipart protocol
 // (US-010 S3-over-S3). Today only the s3 backend implements it; the gateway
@@ -131,10 +144,10 @@ type DataHealthReport struct {
 // bucket lives on; rendered empty for the memory backend (single virtual
 // cluster).
 type PoolStatus struct {
-	Name        string `json:"name"`
-	Class       string `json:"class"`
-	Cluster     string `json:"cluster,omitempty"`
-	BytesUsed   uint64 `json:"bytes_used"`
+	Name      string `json:"name"`
+	Class     string `json:"class"`
+	Cluster   string `json:"cluster,omitempty"`
+	BytesUsed uint64 `json:"bytes_used"`
 	// ChunkCount is the count of RADOS chunks (each chunk is up to 4 MiB);
 	// it is NOT the count of S3 objects. A single 5 MiB S3 object spans
 	// two chunks; the UI column header carries a tooltip explaining the

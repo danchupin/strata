@@ -241,6 +241,17 @@ var (
 		Help: "Per-chunk reconcile errors skipped (meta-lookup or GC-enqueue failure).",
 	})
 
+	// ReconcileDanglingManifestsTotal counts dangling manifests (manifest
+	// present, a referenced chunk missing) found by the reconcile worker's
+	// meta->data pass (US-003), per resolution (report|quarantine).
+	ReconcileDanglingManifestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_reconcile_dangling_manifests_total",
+			Help: "Dangling manifests found by the reconcile worker, per resolution (report|quarantine).",
+		},
+		[]string{"resolution"},
+	)
+
 	MetaTikvAuditSweepDeleted = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "strata_meta_tikv_audit_sweep_deleted_total",
 		Help: "Audit rows expunged by the TiKV audit-retention sweeper (TiKV has no native TTL).",
@@ -596,6 +607,7 @@ func register() {
 		ReconcileChunksScannedTotal,
 		ReconcileOrphansFoundTotal,
 		ReconcileErrorsTotal,
+		ReconcileDanglingManifestsTotal,
 	)
 	prewarmUS001Series()
 	prewarmUS006Series()
@@ -611,6 +623,9 @@ type ReconcileObserver struct{}
 func (ReconcileObserver) ChunkScanned() { ReconcileChunksScannedTotal.Inc() }
 func (ReconcileObserver) OrphanFound(resolution string) {
 	ReconcileOrphansFoundTotal.WithLabelValues(resolution).Inc()
+}
+func (ReconcileObserver) DanglingFound(resolution string) {
+	ReconcileDanglingManifestsTotal.WithLabelValues(resolution).Inc()
 }
 func (ReconcileObserver) ReconcileError() { ReconcileErrorsTotal.Inc() }
 

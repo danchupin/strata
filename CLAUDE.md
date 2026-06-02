@@ -140,6 +140,13 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   chunk's US-001 back-reference, looks up the owner in meta,
                   resolves orphans by policy (report DEFAULT / gc; restore →
                   US-002b). Idempotent + resumable from a `Cursor` watermark.
+                  US-003 adds the inverse DANGLING pass (meta→data): a
+                  bucket-scoped job (`POST /admin/reconcile?bucket=&policy=`)
+                  walks every object version's manifest and probes each chunk
+                  via `reconcile.ChunkProber` (`data.ChunkStater`); a manifest
+                  with a missing chunk is resolved report (count) / quarantine
+                  (mark object unreadable → GET/HEAD 503 `ObjectQuarantined`,
+                  never a silent corrupt 5xx). delete + RADOS/S3 prober → US-003b.
   strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
                   --target-key-id. Idempotent + resumable via rewrap_progress.
 ```
@@ -267,6 +274,34 @@ memory backend without RADOS. Metrics: `strata_reconcile_chunks_scanned_total`,
 `metrics.registeredWorkerNames`). Scan rate via `STRATA_RECONCILE_SCAN_RATE`
 (`rados.ScanRateFromEnv`, read in the data layer — koanf-exempt). S3-passthrough
 native-`ListObjects` scanner is also US-002b.
+
+**Reconcile worker — dangling-manifest detection (US-003 metadata-data-reconcile).**
+The INVERSE direction (meta→data): a manifest that points at a chunk the data
+tier no longer has — a restore left it broken; without this it surfaces only as
+a client 5xx. A reconcile job is now bidirectional, discriminated by
+`ReconcileJob.Bucket`: empty → the US-002 orphan pass (pool-scoped); non-empty
+(the bucket UUID string) → the dangling pass. Admin
+`POST /admin/reconcile?bucket=<name>&policy=` resolves the name→ID and queues a
+dangling job (cluster/pool unused). The worker (`runDanglingJob`) walks every
+object version via `ListObjectVersions` (paginated, resumable from `Cursor` =
+key marker) and probes each `Manifest.Chunks` OID through a
+`reconcile.ChunkProber` (mirrors `data.ChunkStater`, injected — the memory data
+backend implements it; the RADOS per-OID stat is US-003b, so a default-tag build
+gets a nil prober and the dangling job records an error + quarantines nothing,
+NEVER flagging a healthy object on a probe it could not run). A version with a
+missing chunk is dangling, resolved by policy: **report (DEFAULT — count only)
+or quarantine** (`SetObjectQuarantine` sets `Object.QuarantineReason`; the
+GET/HEAD path in `getObject` returns `503 ObjectQuarantined` instead of a silent
+corrupt 5xx from `GetChunks`). `meta.IsValidDanglingPolicy` gates report|quarantine
+(orphan jobs stay report|gc via `IsValidReconcilePolicy`) — `StartReconcile`
+picks by `bucket==""`. **Quarantine state rides a single `Object.QuarantineReason`
+column** (mirrors `RestoreStatus` — NOT the manifest blob, which is proto-encoded
+and would need protoc regen; NOT a hot-path filter) threaded through the objects
+SELECT projection + a dedicated `SetObjectQuarantine` UPDATE across all three
+backends. Counters on the job: `ManifestsScanned`/`Healthy`/`DanglingFound`/
+`DanglingQuarantine`/`DanglingReport` + a per-bucket summary log on clean drain.
+Metric `strata_reconcile_dangling_manifests_total{resolution}`. delete resolution
++ the RADOS/S3 real prober are SPLIT to US-003b.
 
 `cephimpl` exposes its own `RadosCluster` interface (structurally identical
 to `internal/rebalance.RadosCluster`) so it does NOT need to import

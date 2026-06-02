@@ -382,10 +382,21 @@ const (
 // QUEUES the job (202) and the worker walks the pool on a tick so a
 // live-cluster scan never blocks the request goroutine.
 //
-// Scope is a single (Cluster, Pool, Namespace) — multi-cluster reconcile is
-// driven as multiple jobs. The worker enumerates the data tier, reads each
-// chunk's back-reference (US-001), looks the owner up in the meta store, and
-// resolves orphan chunks (chunk present, no manifest references it) by Policy.
+// A job runs in one of two directions, discriminated by Bucket:
+//
+//   - Bucket == "" — an ORPHAN pass (US-002, data->meta): scope is a single
+//     (Cluster, Pool, Namespace); the worker enumerates the data tier, reads
+//     each chunk's back-reference (US-001), looks the owner up in meta, and
+//     resolves orphan chunks (chunk present, no manifest references it) by a
+//     report|gc Policy.
+//   - Bucket != "" — a DANGLING pass (US-003, meta->data): scope is one bucket
+//     (Bucket holds its UUID string); the worker walks every object version's
+//     manifest and probes that each referenced chunk still exists in the data
+//     tier. A dangling manifest (manifest present, chunk missing) is resolved
+//     by a report|quarantine Policy — quarantine marks the object unreadable
+//     (QuarantineReason) so a GET returns a clear error, never a silent corrupt
+//     5xx. Cluster/Pool/Namespace are unused.
+//
 // Cursor is the opaque resume watermark the scanner persists per batch so a
 // crashed/relased pass resumes instead of re-walking from the front
 // (idempotent + resumable). State transitions queued -> running -> done|error;
@@ -396,22 +407,35 @@ type ReconcileJob struct {
 	Cluster   string
 	Pool      string
 	Namespace string
-	Policy    string
-	Cursor    string
-	State     string
-	Message   string
-	// Scanned counts chunk OIDs visited; Orphans* break the orphans down by
-	// the resolution applied; AbsentBackref counts chunks with no
-	// back-reference (legacy / STRATA_CHUNK_BACKREF=false) — never deleted,
-	// always reported; Errors counts per-chunk meta-lookup failures.
+	// Bucket discriminates the pass direction. Empty == orphan pass (data->
+	// meta, scoped to Cluster/Pool/Namespace). Non-empty == dangling pass
+	// (meta->data, scoped to this bucket UUID string).
+	Bucket  string
+	Policy  string
+	Cursor  string
+	State   string
+	Message string
+	// Scanned counts chunk OIDs visited (orphan pass); Orphans* break the
+	// orphans down by the resolution applied; AbsentBackref counts chunks with
+	// no back-reference (legacy / STRATA_CHUNK_BACKREF=false) — never deleted,
+	// always reported; Errors counts per-chunk lookup/probe failures.
 	Scanned       int64
 	OrphansFound  int64
 	OrphansGC     int64
 	OrphansReport int64
 	AbsentBackref int64
 	Errors        int64
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
+	// Dangling-pass (US-003) counters: ManifestsScanned counts object versions
+	// walked; Healthy counts versions whose chunks all exist; DanglingFound
+	// counts versions with a missing chunk, broken down into DanglingQuarantine
+	// (marked unreadable) + DanglingReport (counted only, no mutation).
+	ManifestsScanned   int64
+	Healthy            int64
+	DanglingFound      int64
+	DanglingQuarantine int64
+	DanglingReport     int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 const (
@@ -426,6 +450,11 @@ const (
 	// (meta-older-than-data skew). DEFERRED to the trailing US-002b — shares
 	// the US-004 rebuild grouping; StartReconcile rejects it until then.
 	ReconcilePolicyRestore = "restore"
+	// ReconcilePolicyQuarantine is a DANGLING-pass (US-003) policy: a manifest
+	// whose chunk is missing has its object version marked unreadable
+	// (QuarantineReason) so a GET/HEAD returns a clear error instead of a
+	// silent corrupt 5xx. Valid only for a bucket-scoped dangling job.
+	ReconcilePolicyQuarantine = "quarantine"
 
 	ReconcileStateQueued  = "queued"
 	ReconcileStateRunning = "running"
@@ -433,12 +462,19 @@ const (
 	ReconcileStateError   = "error"
 )
 
-// IsValidReconcilePolicy reports whether p is a policy the US-002 worker can
-// execute. restore is a recognised constant but not yet supported (US-002b),
-// so it returns false here — StartReconcile maps that to
+// IsValidReconcilePolicy reports whether p is a policy the US-002 ORPHAN pass
+// can execute. restore is a recognised constant but not yet supported
+// (US-002b), so it returns false here — StartReconcile maps that to
 // ErrReconcileInvalidPolicy.
 func IsValidReconcilePolicy(p string) bool {
 	return p == ReconcilePolicyReport || p == ReconcilePolicyGC
+}
+
+// IsValidDanglingPolicy reports whether p is a policy the US-003 DANGLING pass
+// can execute (report — count only; quarantine — mark the object unreadable).
+// delete is intentionally not yet offered (US-003b).
+func IsValidDanglingPolicy(p string) bool {
+	return p == ReconcilePolicyReport || p == ReconcilePolicyQuarantine
 }
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
@@ -685,6 +721,13 @@ type Object struct {
 	// objects with no aggregation. Surfaced on HEAD/GET via the
 	// x-amz-checksum-type response header when ChecksumMode=ENABLED.
 	ChecksumType string
+	// QuarantineReason, when non-empty, marks the object version unreadable:
+	// the reconcile worker's dangling-manifest pass (US-003) found a
+	// referenced data chunk missing and quarantined the object so a GET/HEAD
+	// returns a deterministic clear error instead of a silent corrupt 5xx.
+	// Empty == healthy. Persisted via SetObjectQuarantine (a dedicated UPDATE,
+	// mirroring RestoreStatus); read back on the GET/HEAD path.
+	QuarantineReason string
 }
 
 type ListOptions struct {
@@ -1145,6 +1188,12 @@ type Store interface {
 	SetObjectRetention(ctx context.Context, bucketID uuid.UUID, key, versionID, mode string, until time.Time) error
 	SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key, versionID string, on bool) error
 	SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error
+	// SetObjectQuarantine marks (reason != "") or clears (reason == "") the
+	// object version's QuarantineReason. Set by the reconcile dangling pass
+	// (US-003) when a referenced data chunk is missing so the GET/HEAD path
+	// returns a clear error instead of a silent corrupt 5xx. Returns
+	// ErrObjectNotFound when the row is absent.
+	SetObjectQuarantine(ctx context.Context, bucketID uuid.UUID, key, versionID, reason string) error
 
 	SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketLifecycle(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
@@ -1432,13 +1481,15 @@ type Store interface {
 	// FinishedAt columns. Returns ErrAdminJobNotFound when no row exists.
 	UpdateAdminJob(ctx context.Context, job *AdminJob) error
 
-	// StartReconcile queues a data-tier reconcile pass over (cluster, pool,
-	// namespace) with the given resolution policy and returns the created
-	// ReconcileJob (state=queued, a freshly minted ID). Returns
-	// ErrReconcileInvalidPolicy when policy is not report|gc (restore is
-	// deferred to US-002b). The leader-elected reconcile worker drains the
-	// job out-of-band.
-	StartReconcile(ctx context.Context, cluster, pool, namespace, policy string) (*ReconcileJob, error)
+	// StartReconcile queues a data-tier reconcile pass and returns the created
+	// ReconcileJob (state=queued, a freshly minted ID). An empty bucket queues
+	// an ORPHAN pass over (cluster, pool, namespace) — policy must be report|gc
+	// (US-002). A non-empty bucket (its UUID string) queues a DANGLING pass
+	// over that bucket — policy must be report|quarantine (US-003). Returns
+	// ErrReconcileInvalidPolicy when the policy is not valid for the pass kind
+	// (restore is deferred to US-002b, delete to US-003b). The leader-elected
+	// reconcile worker drains the job out-of-band.
+	StartReconcile(ctx context.Context, cluster, pool, namespace, bucket, policy string) (*ReconcileJob, error)
 	// GetReconcileJob returns the job addressed by id (any state, including
 	// done/error for status polling), or ErrReconcileNotFound.
 	GetReconcileJob(ctx context.Context, id string) (*ReconcileJob, error)

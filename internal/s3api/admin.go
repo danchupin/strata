@@ -453,6 +453,7 @@ type adminReconcileResponse struct {
 	Cluster       string `json:"cluster"`
 	Pool          string `json:"pool"`
 	Namespace     string `json:"namespace,omitempty"`
+	Bucket        string `json:"bucket,omitempty"`
 	Policy        string `json:"policy"`
 	State         string `json:"state"`
 	Cursor        string `json:"cursor,omitempty"`
@@ -461,39 +462,69 @@ type adminReconcileResponse struct {
 	OrphansGC     int64  `json:"orphans_gc"`
 	OrphansReport int64  `json:"orphans_report"`
 	AbsentBackref int64  `json:"absent_backref"`
-	Errors        int64  `json:"errors"`
-	Message       string `json:"message,omitempty"`
+	// Dangling-pass (US-003) counters.
+	ManifestsScanned   int64  `json:"manifests_scanned"`
+	Healthy            int64  `json:"healthy"`
+	DanglingFound      int64  `json:"dangling_found"`
+	DanglingQuarantine int64  `json:"dangling_quarantine"`
+	DanglingReport     int64  `json:"dangling_report"`
+	Errors             int64  `json:"errors"`
+	Message            string `json:"message,omitempty"`
 }
 
-// adminReconcile queues a data-tier reconcile pass over a (cluster, pool,
-// namespace) scope and returns immediately (202 Accepted) with a job id. The
-// pool walk + orphan resolution is driven asynchronously by the leader-elected
-// `reconcile` worker (cmd/strata/workers/reconcile.go) — a live-cluster scan
-// must not block the HTTP request. Operators poll progress via
-// GET /admin/reconcile?id=<id>. Enable the worker with
+// adminReconcile queues a data-tier reconcile pass and returns immediately
+// (202 Accepted) with a job id. The pass is driven asynchronously by the
+// leader-elected `reconcile` worker (cmd/strata/workers/reconcile.go) — a
+// live-cluster scan must not block the HTTP request. Operators poll progress
+// via GET /admin/reconcile?id=<id>. Enable the worker with
 // STRATA_WORKERS=...,reconcile on at least one replica.
 //
-// Query params: cluster (required), pool (required), namespace (optional —
-// default namespace; \x01 for all namespaces), policy (report|gc, default
-// report). restore is rejected (US-002b).
+// Two directions, selected by the bucket param:
+//   - ORPHAN pass (US-002, data->meta): bucket absent. Params: cluster
+//     (required), pool (required), namespace (optional — default namespace;
+//     \x01 for all namespaces), policy (report|gc, default report). restore is
+//     rejected (US-002b).
+//   - DANGLING pass (US-003, meta->data): bucket=<name> present. Walks the
+//     bucket's manifests and probes each chunk; policy (report|quarantine,
+//     default report). cluster/pool are not required.
 func (s *Server) adminReconcile(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	cluster := q.Get("cluster")
-	pool := q.Get("pool")
-	if cluster == "" || pool == "" {
-		writeError(w, r, APIError{
-			Code:    "InvalidArgument",
-			Message: "cluster and pool are required",
-			Status:  http.StatusBadRequest,
-		})
-		return
-	}
-	namespace := q.Get("namespace")
+	bucketName := q.Get("bucket")
 	policy := q.Get("policy")
 	if policy == "" {
 		policy = meta.ReconcilePolicyReport
 	}
-	job, err := s.Meta.StartReconcile(r.Context(), cluster, pool, namespace, policy)
+
+	var (
+		cluster, pool, namespace string
+		bucketID                 string
+		auditResource            string
+	)
+	if bucketName != "" {
+		// Dangling pass: resolve the bucket name to its UUID for the worker.
+		b, err := s.Meta.GetBucket(r.Context(), bucketName)
+		if err != nil {
+			mapMetaErr(w, r, err)
+			return
+		}
+		bucketID = b.ID.String()
+		auditResource = "bucket:" + bucketName
+	} else {
+		cluster = q.Get("cluster")
+		pool = q.Get("pool")
+		if cluster == "" || pool == "" {
+			writeError(w, r, APIError{
+				Code:    "InvalidArgument",
+				Message: "cluster and pool are required (or pass bucket= for a dangling-manifest pass)",
+				Status:  http.StatusBadRequest,
+			})
+			return
+		}
+		namespace = q.Get("namespace")
+		auditResource = "cluster:" + cluster + "/" + pool
+	}
+
+	job, err := s.Meta.StartReconcile(r.Context(), cluster, pool, namespace, bucketID, policy)
 	if err != nil {
 		if errors.Is(err, meta.ErrReconcileInvalidPolicy) {
 			writeError(w, r, APIError{Code: "InvalidArgument", Message: err.Error(), Status: http.StatusBadRequest})
@@ -502,7 +533,7 @@ func (s *Server) adminReconcile(w http.ResponseWriter, r *http.Request) {
 		mapMetaErr(w, r, err)
 		return
 	}
-	SetAuditOverride(r.Context(), "admin:Reconcile", "cluster:"+cluster+"/"+pool, "", principalFromContext(r))
+	SetAuditOverride(r.Context(), "admin:Reconcile", auditResource, "", principalFromContext(r))
 	writeAdminJSON(w, http.StatusAccepted, reconcileResponse(job))
 }
 
@@ -528,21 +559,27 @@ func (s *Server) adminReconcileStatus(w http.ResponseWriter, r *http.Request) {
 
 func reconcileResponse(job *meta.ReconcileJob) adminReconcileResponse {
 	return adminReconcileResponse{
-		OK:            true,
-		ID:            job.ID,
-		Cluster:       job.Cluster,
-		Pool:          job.Pool,
-		Namespace:     job.Namespace,
-		Policy:        job.Policy,
-		State:         job.State,
-		Cursor:        job.Cursor,
-		Scanned:       job.Scanned,
-		OrphansFound:  job.OrphansFound,
-		OrphansGC:     job.OrphansGC,
-		OrphansReport: job.OrphansReport,
-		AbsentBackref: job.AbsentBackref,
-		Errors:        job.Errors,
-		Message:       job.Message,
+		OK:                 true,
+		ID:                 job.ID,
+		Cluster:            job.Cluster,
+		Pool:               job.Pool,
+		Namespace:          job.Namespace,
+		Bucket:             job.Bucket,
+		Policy:             job.Policy,
+		State:              job.State,
+		Cursor:             job.Cursor,
+		Scanned:            job.Scanned,
+		OrphansFound:       job.OrphansFound,
+		OrphansGC:          job.OrphansGC,
+		OrphansReport:      job.OrphansReport,
+		AbsentBackref:      job.AbsentBackref,
+		ManifestsScanned:   job.ManifestsScanned,
+		Healthy:            job.Healthy,
+		DanglingFound:      job.DanglingFound,
+		DanglingQuarantine: job.DanglingQuarantine,
+		DanglingReport:     job.DanglingReport,
+		Errors:             job.Errors,
+		Message:            job.Message,
 	}
 }
 
