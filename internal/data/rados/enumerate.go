@@ -95,6 +95,14 @@ type EnumerateOptions struct {
 	// ChunkOIDsOnly filters the stream to Strata chunk OIDs (IsChunkOID),
 	// skipping foreign objects sharing the pool.
 	ChunkOIDsOnly bool
+	// WithBackref makes the enumerator read each chunk's back-reference xattr
+	// (BackrefXattrName) inline — one extra GetXattr riding the same ioctx, no
+	// second Iter — and surface the raw bytes on PoolObject.Backref. Used by
+	// the reconcile worker (US-002) to attribute each chunk to its owner
+	// without a second per-OID round trip from the caller. A chunk with no
+	// back-reference (legacy / STRATA_CHUNK_BACKREF=false) yields a nil
+	// PoolObject.Backref, not an error.
+	WithBackref bool
 }
 
 // PoolObject is one enumerated object: its name plus the namespace it lives
@@ -102,6 +110,11 @@ type EnumerateOptions struct {
 type PoolObject struct {
 	OID       string
 	Namespace string
+	// Backref is the raw back-reference xattr bytes (BackrefXattrName) when
+	// EnumerateOptions.WithBackref is set, else nil. Decode via
+	// data.DecodeBackref. nil also signals "no back-reference present" — a
+	// legacy chunk or one written with STRATA_CHUNK_BACKREF=false.
+	Backref []byte
 }
 
 // PoolVisitor is invoked once per enumerated object with a resume cursor

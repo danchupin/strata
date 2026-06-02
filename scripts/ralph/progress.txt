@@ -146,3 +146,87 @@ Cycle: ralph/metadata-data-reconcile
     b.ioctx seam; go-ceph ioctx.GetXattr(oid, name, buf []byte) (int, error)
     reads into a caller buffer.
 ---
+
+## 2026-06-02 - US-002 Reconcile worker — orphan chunk detection + report/gc policy
+- Shipped the data-tier reconcile worker: after a restore it walks the RADOS
+  pool, reads each chunk's US-001 back-reference, looks up the owner in meta,
+  and resolves orphan chunks (chunk present, no manifest references it) by an
+  explicit per-run policy. Closes the "silent orphan leak after restore" gap
+  for single-PUT objects (GC walks meta->data and never sees orphans).
+- Execution model mirrors the reshard worker (US-005): admin POST QUEUES a job
+  (202), the leader-elected `reconcile` worker drains it out-of-band on a tick,
+  GET reads progress. NOT the inline-goroutine AdminJob.
+- Files added:
+  - internal/reconcile/reconcile.go: Worker + RunOnce (drains queued jobs),
+    ChunkScanner interface + ScannedChunk + ScanScope, Observer seam, classify
+    (data->meta orphan detection) + policy apply (report/gc), resumable via
+    job.Cursor + CheckpointEvery, per-job scan error -> state=error (siblings
+    continue). manifestReferencesOID healthy check.
+  - internal/reconcile/scan_rados.go: RADOSScanner adapter wrapping
+    rados.EnumeratePool with WithBackref (CGO-free; sentinel on non-ceph).
+  - internal/reconcile/reconcile_test.go: red/green on memory backend + fake
+    ChunkScanner — report no-delete, gc enqueues only the orphan, healthy
+    untouched under gc, overwritten-version-is-orphan, resume cursor,
+    scan-error marks job, invalid-policy rejected.
+  - internal/meta/tikv/reconcile.go + cassandra/reconcile.go: ReconcileJob
+    queue (Start/Get/Update/List). Cassandra reconcile_jobs DDL (schema.go);
+    TiKV s/Rc/<id> keyspace (keys.go) + full-struct JSON body.
+  - cmd/strata/workers/reconcile.go: registration + tick wrapping
+    (StartIteration/EndIteration + ObserveWorkerTick).
+- Files changed:
+  - internal/meta/store.go: ReconcileJob struct + policy/state consts +
+    IsValidReconcilePolicy + sentinels (ErrReconcileNotFound /
+    ErrReconcileInvalidPolicy) + 4 Store interface methods.
+  - internal/meta/memory/store.go: reconcileJobs map + 4 methods.
+  - internal/meta/storetest/contract.go: caseReconcileJobRoundTrip (all 3
+    backends; List returns only queued|running, done/error gettable by id).
+  - internal/data/rados/enumerate.go: EnumerateOptions.WithBackref +
+    PoolObject.Backref (additive to US-000).
+  - internal/data/rados/cephimpl/enumerate.go: read user.strata.backref inline
+    via one GetXattr riding the ioctx when WithBackref; ENODATA/ENOENT->absent
+    (errCoder interface dodges go-ceph internal/errutil import).
+  - internal/data/rados/cephimpl/backref_integration_test.go: CI assertion
+    that EnumeratePool WithBackref surfaces the decodable xattr.
+  - internal/metrics/metrics.go: 3 counters + ReconcileObserver +
+    reconcile in registeredWorkerNames + MustRegister.
+  - internal/s3api/admin.go: adminReconcile (POST 202 queue) +
+    adminReconcileStatus (GET) + router case + audit admin:Reconcile.
+  - internal/s3api/admin_test.go: queue+status + reject-bad-input HTTP tests.
+  - internal/config/config.go: ReconcileConfig (interval + checkpoint_every) +
+    default + clamp; exempt_env_vars.go: STRATA_CHUNK_BACKREF +
+    STRATA_RECONCILE_SCAN_RATE (read in data layer, koanf-exempt);
+    deploy/strata.toml.example: [workers.reconcile] section.
+  - CLAUDE.md + ROADMAP.md (Known-latent US-002-split entry) + prd.json
+    (US-002 passes:true + NEW trailing US-002b).
+- SPLIT recorded: restore policy (rebuild manifest from back-ref; shares US-004
+  grouping) + S3-passthrough native-ListObjects scanner deferred to US-002b
+  (priority 10, after US-004). StartReconcile rejects restore today.
+- Quality: gofmt clean; CGO_ENABLED=0 go test ./internal/reconcile/
+  ./internal/s3api/ ./internal/meta/memory/ ./internal/config/
+  ./internal/metrics/ (minus the macOS-only process_resident_memory_bytes
+  test) ./internal/data/... all OK; go vet clean. TiKV + cephimpl legs are
+  CI-only (gosigar-darwin + cgo block local build) — CI Linux is truth.
+- **Learnings for future iterations:**
+  - Data->meta orphan detection FUNDAMENTALLY needs the back-reference: the
+    meta tier is not indexed by chunk OID, so the only way to attribute a pool
+    chunk to an owner is to read its US-001 back-ref then GetObject + scan
+    Manifest.Chunks. A chunk with no back-ref can NEVER be safely deleted
+    (HasBackref=false -> counted AbsentBackref, reported, never gc'd).
+  - Reconcile job queue is a fresh-UUID-keyed standalone work item (like
+    AdminJob), NOT a per-bucket singleton (like ReshardJob). TiKV stores the
+    full struct as JSON (no key-elides-id); Cassandra a plain table. List
+    returns only queued|running (worker drain set); done/error rows persist
+    for status polling — the worker filters, not the store deleting on done.
+  - go-ceph GetXattr returns an error exposing ErrorCode() int (ENODATA=-61,
+    ENOENT=-2 on Linux). Assert the `interface{ ErrorCode() int }` to detect
+    "xattr absent / object vanished" without importing go-ceph internal/errutil.
+    Both mean "no back-reference here", not a hard IO failure.
+  - Env vars read in the data / data/rados layers (STRATA_CHUNK_BACKREF,
+    STRATA_RECONCILE_SCAN_RATE via os.Getenv) must go in
+    internal/config/exempt_env_vars.go — those layers intentionally don't
+    import internal/config. The TestEnvTOMLParity gate fails otherwise. (US-000
+    + US-001 both regressed this latent — fixed in US-002.)
+  - Inject the scan source as a reconcile.ChunkScanner so the classify/policy
+    logic is CI-green on the memory backend with a fake scanner; the RADOS leg
+    (real EnumeratePool) is integration-only.
+---

@@ -65,6 +65,7 @@ const (
 	prefixAuditLog         = Namespace + "A/"   // s/A/<bucket16><day4><eventID>
 	prefixLeaderLock       = Namespace + "L/"   // s/L/<lockName>
 	prefixReshardJob       = Namespace + "Rj/"  // s/Rj/<bucket16>
+	prefixReconcileJob     = Namespace + "Rc/"  // s/Rc/<id>                   (US-002 metadata-data-reconcile)
 	prefixAdminJob         = Namespace + "Aj/"  // s/Aj/<id>
 	prefixHeartbeat        = Namespace + "hb/"  // s/hb/<nodeID>
 	prefixClusterState     = Namespace + "cs/"  // s/cs/<clusterID>            (US-006 placement-rebalance drain sentinel)
@@ -490,6 +491,18 @@ func ReshardJobsPrefix() []byte {
 // shape as other variable-length-segment encodings in this file.
 func AdminJobKey(id string) []byte {
 	return appendEscaped([]byte(prefixAdminJob), id)
+}
+
+// ReconcileJobKey is the per-id row for a data-tier reconcile job (US-002).
+// Global-prefixed so ListReconcileJobs is one ordered range scan; the
+// server-minted UUID id is escaped + terminated like other var-length keys.
+func ReconcileJobKey(id string) []byte {
+	return appendEscaped([]byte(prefixReconcileJob), id)
+}
+
+// ReconcileJobsPrefix is the global scan origin for ListReconcileJobs.
+func ReconcileJobsPrefix() []byte {
+	return []byte(prefixReconcileJob)
 }
 
 // ReshardCursorKey is one row per (bucket, shardID) tracking the

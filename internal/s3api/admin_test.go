@@ -75,6 +75,64 @@ func TestAdmin_LifecycleTick_OK(t *testing.T) {
 	}
 }
 
+func TestAdmin_Reconcile_QueueAndStatus(t *testing.T) {
+	h := newNotifyHarness(t)
+
+	// Queue a report-policy pass.
+	resp := h.doString("POST", "/admin/reconcile?cluster=ceph-a&pool=strata-data&policy=report", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusAccepted)
+	var queued struct {
+		OK      bool   `json:"ok"`
+		ID      string `json:"id"`
+		Cluster string `json:"cluster"`
+		Pool    string `json:"pool"`
+		Policy  string `json:"policy"`
+		State   string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&queued); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	resp.Body.Close()
+	if !queued.OK || queued.ID == "" || queued.State != "queued" ||
+		queued.Cluster != "ceph-a" || queued.Pool != "strata-data" || queued.Policy != "report" {
+		t.Fatalf("queue round-trip: %+v", queued)
+	}
+
+	// Poll its status by id.
+	resp = h.doString("GET", "/admin/reconcile?id="+queued.ID, "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusOK)
+	var status struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	resp.Body.Close()
+	if status.ID != queued.ID {
+		t.Fatalf("status id mismatch: %+v", status)
+	}
+}
+
+func TestAdmin_Reconcile_RejectsBadInput(t *testing.T) {
+	h := newNotifyHarness(t)
+
+	// restore policy is deferred to US-002b -> 400.
+	resp := h.doString("POST", "/admin/reconcile?cluster=ceph-a&pool=strata-data&policy=restore", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Missing pool -> 400.
+	resp = h.doString("POST", "/admin/reconcile?cluster=ceph-a", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusBadRequest)
+	resp.Body.Close()
+
+	// Unknown job id -> 404.
+	resp = h.doString("GET", "/admin/reconcile?id=does-not-exist", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusNotFound)
+	resp.Body.Close()
+}
+
 func TestAdmin_GCDrain_OK(t *testing.T) {
 	h := newNotifyHarness(t)
 	resp := h.doString("POST", "/admin/gc/drain", "", testPrincipalHeader, s3api.IAMRootPrincipal)

@@ -67,6 +67,14 @@ var ExemptEnvVars = struct {
 		// rules, not an environment variable. The audit's broad
 		// quoted-literal collector picks it up — exempt it explicitly.
 		"STRATA_COLD",
+		// STRATA_CHUNK_BACKREF (data.BackrefEnabledFromEnv) and
+		// STRATA_RECONCILE_SCAN_RATE (rados.ScanRateFromEnv) are read via
+		// os.Getenv in the data / data/rados layers, which intentionally do
+		// NOT import internal/config (layering: the data plane stays
+		// koanf-free). Documented in the reconcile runbook + RADOS section,
+		// not the koanf TOML — exempt like STRATA_COLD.
+		"STRATA_CHUNK_BACKREF",
+		"STRATA_RECONCILE_SCAN_RATE",
 	},
 	Prefixes: []string{
 		"STRATA_BENCH_",

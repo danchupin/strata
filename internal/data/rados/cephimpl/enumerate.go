@@ -6,8 +6,50 @@ import (
 
 	goceph "github.com/ceph/go-ceph/rados"
 
+	"github.com/danchupin/strata/internal/data"
 	"github.com/danchupin/strata/internal/data/rados"
 )
+
+// Linux errno values returned by go-ceph's GetXattr via the
+// ErrorCode()-exposing cephError. ENODATA = the xattr is absent (legacy /
+// STRATA_CHUNK_BACKREF=false chunk); ENOENT = the object vanished between the
+// Iter step and the GetXattr (a benign restore/GC race). Both mean "no
+// back-reference here", not a hard IO failure. cephimpl only builds on Linux
+// (the ceph tag), so these constants are fixed.
+const (
+	errnoENOENT  = -2
+	errnoENODATA = -61
+)
+
+// errCoder is the structural view of go-ceph's internal cephError, which
+// exposes the raw errno via ErrorCode(). Asserting the interface avoids
+// importing go-ceph's internal/errutil package.
+type errCoder interface{ ErrorCode() int }
+
+// readBackrefXattr reads the back-reference xattr (BackrefXattrName) off oid
+// using the supplied (already namespace-bound) ioctx. Returns (nil, nil) when
+// the xattr is absent or the object vanished — both are benign "no
+// back-reference" signals the reconcile worker reports rather than fails on. A
+// real IO error propagates.
+func readBackrefXattr(ioctx *goceph.IOContext, oid string) ([]byte, error) {
+	// 4 KiB comfortably exceeds the max back-reference payload (schema(1) +
+	// bucketID(16) + mtime(8) + chunkIdx(4) + verLen(2) + version(~36) +
+	// key(<=1024) ~= 1.1 KiB), so ERANGE-truncation cannot happen.
+	buf := make([]byte, 4096)
+	n, err := ioctx.GetXattr(oid, data.BackrefXattrName, buf)
+	if err != nil {
+		if ec, ok := err.(errCoder); ok {
+			switch ec.ErrorCode() {
+			case errnoENODATA, errnoENOENT:
+				return nil, nil
+			}
+		}
+		return nil, err
+	}
+	out := make([]byte, n)
+	copy(out, buf[:n])
+	return out, nil
+}
 
 // EnumeratePool walks every object in (cluster, opts.Pool, opts.Namespace)
 // via librados' rados_nobjects_list (go-ceph ioctx.Iter), streaming object
@@ -55,6 +97,16 @@ func (b *Backend) EnumeratePool(ctx context.Context, cluster string, opts rados.
 			continue
 		}
 		obj := rados.PoolObject{OID: oid, Namespace: iter.Namespace()}
+		if opts.WithBackref {
+			// One GetXattr riding the same cached ioctx (no second Iter). A
+			// missing xattr (legacy / STRATA_CHUNK_BACKREF=false chunk) yields
+			// a nil Backref, not an error — reconcile reports it absent.
+			br, gerr := readBackrefXattr(ioctx, oid)
+			if gerr != nil {
+				return fmt.Errorf("rados: enumerate read backref %s: %w", oid, gerr)
+			}
+			obj.Backref = br
+		}
 		if err := visit(obj, rados.EnumerateCursor(uint32(iter.Token()))); err != nil {
 			return err
 		}

@@ -80,6 +80,12 @@ var (
 	ErrNoRewrapProgress            = errors.New("no rewrap progress recorded for bucket")
 	ErrAdminJobNotFound            = errors.New("admin job not found")
 	ErrAdminJobAlreadyExists       = errors.New("admin job already exists")
+	ErrReconcileNotFound           = errors.New("no reconcile job with that id")
+	// ErrReconcileInvalidPolicy is returned by StartReconcile for an unknown
+	// or not-yet-supported resolution policy. report + gc ship in US-002;
+	// restore is deferred to the trailing US-002b (shares the US-004
+	// rebuild-from-back-reference grouping) and is rejected until then.
+	ErrReconcileInvalidPolicy = errors.New("reconcile policy must be report or gc")
 	// ErrQuotaExceeded signals that a write would exceed a configured
 	// per-bucket or per-user quota (US-006). Surfaced from the gateway as
 	// HTTP 403 / S3 code "QuotaExceeded" — non-AWS but matches the RGW shape
@@ -368,6 +374,72 @@ const (
 	AdminJobStateDone    = "done"
 	AdminJobStateError   = "error"
 )
+
+// ReconcileJob is a queued or running data-tier reconcile pass (US-002
+// metadata-data-reconcile). It is created by StartReconcile (the admin
+// POST handler) and drained out-of-band by the leader-elected `reconcile`
+// worker, mirroring the reshard admin-queue pattern: the HTTP request only
+// QUEUES the job (202) and the worker walks the pool on a tick so a
+// live-cluster scan never blocks the request goroutine.
+//
+// Scope is a single (Cluster, Pool, Namespace) — multi-cluster reconcile is
+// driven as multiple jobs. The worker enumerates the data tier, reads each
+// chunk's back-reference (US-001), looks the owner up in the meta store, and
+// resolves orphan chunks (chunk present, no manifest references it) by Policy.
+// Cursor is the opaque resume watermark the scanner persists per batch so a
+// crashed/relased pass resumes instead of re-walking from the front
+// (idempotent + resumable). State transitions queued -> running -> done|error;
+// done/error rows persist for status polling and are NOT returned by
+// ListReconcileJobs (the worker drains only queued|running).
+type ReconcileJob struct {
+	ID        string
+	Cluster   string
+	Pool      string
+	Namespace string
+	Policy    string
+	Cursor    string
+	State     string
+	Message   string
+	// Scanned counts chunk OIDs visited; Orphans* break the orphans down by
+	// the resolution applied; AbsentBackref counts chunks with no
+	// back-reference (legacy / STRATA_CHUNK_BACKREF=false) — never deleted,
+	// always reported; Errors counts per-chunk meta-lookup failures.
+	Scanned       int64
+	OrphansFound  int64
+	OrphansGC     int64
+	OrphansReport int64
+	AbsentBackref int64
+	Errors        int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+}
+
+const (
+	// ReconcilePolicyReport is the DEFAULT — orphans are counted and reported,
+	// never deleted. The safe post-restore first pass: an operator reviews the
+	// summary before choosing a destructive policy.
+	ReconcilePolicyReport = "report"
+	// ReconcilePolicyGC enqueues each orphan chunk for deletion via the GC
+	// queue (the object was rolled back; the chunk is genuinely unreferenced).
+	ReconcilePolicyGC = "gc"
+	// ReconcilePolicyRestore rebuilds the manifest row from the back-reference
+	// (meta-older-than-data skew). DEFERRED to the trailing US-002b — shares
+	// the US-004 rebuild grouping; StartReconcile rejects it until then.
+	ReconcilePolicyRestore = "restore"
+
+	ReconcileStateQueued  = "queued"
+	ReconcileStateRunning = "running"
+	ReconcileStateDone    = "done"
+	ReconcileStateError   = "error"
+)
+
+// IsValidReconcilePolicy reports whether p is a policy the US-002 worker can
+// execute. restore is a recognised constant but not yet supported (US-002b),
+// so it returns false here — StartReconcile maps that to
+// ErrReconcileInvalidPolicy.
+func IsValidReconcilePolicy(p string) bool {
+	return p == ReconcilePolicyReport || p == ReconcilePolicyGC
+}
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
 // `strata admin rewrap` for resumability across runs.
@@ -1359,6 +1431,23 @@ type Store interface {
 	// UpdateAdminJob overwrites the State/Message/Deleted/UpdatedAt/
 	// FinishedAt columns. Returns ErrAdminJobNotFound when no row exists.
 	UpdateAdminJob(ctx context.Context, job *AdminJob) error
+
+	// StartReconcile queues a data-tier reconcile pass over (cluster, pool,
+	// namespace) with the given resolution policy and returns the created
+	// ReconcileJob (state=queued, a freshly minted ID). Returns
+	// ErrReconcileInvalidPolicy when policy is not report|gc (restore is
+	// deferred to US-002b). The leader-elected reconcile worker drains the
+	// job out-of-band.
+	StartReconcile(ctx context.Context, cluster, pool, namespace, policy string) (*ReconcileJob, error)
+	// GetReconcileJob returns the job addressed by id (any state, including
+	// done/error for status polling), or ErrReconcileNotFound.
+	GetReconcileJob(ctx context.Context, id string) (*ReconcileJob, error)
+	// UpdateReconcileJob persists a Cursor/State/Message/counter update. The
+	// worker calls this after each scan batch so a crash resumes from Cursor.
+	UpdateReconcileJob(ctx context.Context, job *ReconcileJob) error
+	// ListReconcileJobs returns every queued or running reconcile job. The
+	// reconcile worker calls this on each tick; done/error rows are excluded.
+	ListReconcileJobs(ctx context.Context) ([]*ReconcileJob, error)
 
 	Close() error
 }

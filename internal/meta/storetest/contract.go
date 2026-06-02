@@ -61,6 +61,7 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"SampleBucketShardStats", caseSampleBucketShardStats},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
+		{"ReconcileJobRoundTrip", caseReconcileJobRoundTrip},
 		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
 		{"UserPolicyAttach", caseUserPolicyAttach},
 		{"IAMAccessKeyDisabled", caseIAMAccessKeyDisabled},
@@ -2501,6 +2502,106 @@ func caseAdminJobRoundTrip(t *testing.T, s meta.Store) {
 	if err := s.UpdateAdminJob(ctx, &meta.AdminJob{ID: "nonexistent"}); err != meta.ErrAdminJobNotFound {
 		t.Errorf("missing update: %v want ErrAdminJobNotFound", err)
 	}
+}
+
+// caseReconcileJobRoundTrip exercises the reconcile job queue (US-002
+// metadata-data-reconcile): start (policy-validated) -> list (active set) ->
+// update (cursor + counter watermark) -> terminal state drops from the list ->
+// get-by-id still resolves -> invalid policy + missing-id sentinels.
+func caseReconcileJobRoundTrip(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	// restore is a recognised constant but not yet supported (US-002b).
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", meta.ReconcilePolicyRestore); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("restore policy: got %v want ErrReconcileInvalidPolicy", err)
+	}
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "bogus"); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("bogus policy: got %v want ErrReconcileInvalidPolicy", err)
+	}
+
+	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "cls-cold", meta.ReconcilePolicyReport)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if job.ID == "" || job.State != meta.ReconcileStateQueued || job.Policy != meta.ReconcilePolicyReport {
+		t.Fatalf("start round-trip: %+v", job)
+	}
+	if job.Cluster != "ceph-a" || job.Pool != "strata-data" || job.Namespace != "cls-cold" {
+		t.Fatalf("start scope: %+v", job)
+	}
+
+	// Queued jobs appear in the worker's drain set.
+	active, err := s.ListReconcileJobs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !containsReconcileID(active, job.ID) {
+		t.Fatalf("queued job missing from list: %+v", active)
+	}
+
+	// Worker advances the cursor + counters and flips to running.
+	job.State = meta.ReconcileStateRunning
+	job.Cursor = "pg-42"
+	job.Scanned = 1000
+	job.OrphansFound = 3
+	job.OrphansReport = 3
+	job.AbsentBackref = 1
+	if err := s.UpdateReconcileJob(ctx, job); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetReconcileJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != meta.ReconcileStateRunning || got.Cursor != "pg-42" ||
+		got.Scanned != 1000 || got.OrphansFound != 3 || got.OrphansReport != 3 || got.AbsentBackref != 1 {
+		t.Fatalf("update round-trip: %+v", got)
+	}
+
+	// Running jobs are still in the drain set.
+	active, err = s.ListReconcileJobs(ctx)
+	if err != nil {
+		t.Fatalf("re-list: %v", err)
+	}
+	if !containsReconcileID(active, job.ID) {
+		t.Fatalf("running job missing from list: %+v", active)
+	}
+
+	// Terminal state drops the job from the drain set but stays gettable.
+	got.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, got); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	active, err = s.ListReconcileJobs(ctx)
+	if err != nil {
+		t.Fatalf("post-done list: %v", err)
+	}
+	if containsReconcileID(active, job.ID) {
+		t.Fatalf("done job still in drain set: %+v", active)
+	}
+	done, err := s.GetReconcileJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get done: %v", err)
+	}
+	if done.State != meta.ReconcileStateDone {
+		t.Fatalf("done state: %+v", done)
+	}
+
+	if _, err := s.GetReconcileJob(ctx, "nonexistent"); err != meta.ErrReconcileNotFound {
+		t.Errorf("missing get: %v want ErrReconcileNotFound", err)
+	}
+	if err := s.UpdateReconcileJob(ctx, &meta.ReconcileJob{ID: "nonexistent"}); err != meta.ErrReconcileNotFound {
+		t.Errorf("missing update: %v want ErrReconcileNotFound", err)
+	}
+}
+
+func containsReconcileID(jobs []*meta.ReconcileJob, id string) bool {
+	for _, j := range jobs {
+		if j.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // caseManagedPolicyCRUD exercises the ManagedPolicy storage surface (US-010):

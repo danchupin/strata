@@ -645,6 +645,14 @@ Non-goals:
   fatal). Closing it needs either a re-stamp pass at Complete (extra round-trip per part chunk — defeats the
   "same WriteOp" cost goal) or carrying the upload identity in the part xattr and rewriting the version on
   Complete. Tracked as the trailing `US-001b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-001)
+- **P3 — Reconcile `restore` policy + S3-passthrough chunk scanner deferred (US-002 split).** The reconcile worker
+  (US-002) ships orphan-chunk detection + the `report` (default) and `gc` policies over the RADOS pool via the
+  US-000 enumeration primitive (`reconcile.RADOSScanner` → `rados.EnumeratePool` with `WithBackref`). Two pieces are
+  split out: (1) the `restore` policy (rebuild the manifest row from the back-reference for the meta-older-than-data
+  skew) — it shares the US-004 `rebuild-index` grouping logic, so `meta.StartReconcile` rejects `restore` with
+  `ErrReconcileInvalidPolicy` until then; (2) the S3-passthrough backend's native-`ListObjects` chunk scanner (the
+  RADOS leg is wired + CI-integration-tested; the S3 leg reuses the same `ChunkScanner` seam). Tracked as the trailing
+  `US-002b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-002)
 - **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
   reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
   the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but

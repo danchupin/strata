@@ -72,8 +72,8 @@
         "Tests pass"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Core shipped: leader-elected `reconcile` worker (internal/reconcile/ + cmd/strata/workers/reconcile.go) drains admin-queued jobs (reshard pattern). NEW meta.ReconcileJob queue across all 3 backends (StartReconcile/GetReconcileJob/UpdateReconcileJob/ListReconcileJobs; List returns queued|running only, done/error persist for status) + storetest caseReconcileJobRoundTrip + Cassandra reconcile_jobs DDL + TiKV s/Rc/ keyspace. Orphan detection (data->meta): reads US-001 back-reference per chunk, GetObject(bucket,key,version), healthy iff Manifest.Chunks references the OID; orphan = object/bucket gone OR manifest no longer references it (overwritten/rolled-back). Policies report (DEFAULT, never delete) + gc (EnqueueChunkDeletion). Absent-backref chunks counted (AbsentBackref) + reported, NEVER deleted. Resumable via job.Cursor watermark (CheckpointEvery); per-job scan error -> state=error, sibling jobs continue. Rate-limited via STRATA_RECONCILE_SCAN_RATE. Admin POST/GET /admin/reconcile (202 queue + audit admin:Reconcile + status). Metrics strata_reconcile_chunks_scanned_total/_orphans_found_total{resolution}/_errors_total + reconcile in registeredWorkerNames + per-tick ObserveWorkerTick/StartIteration/EndIteration. RADOS scanner = reconcile.RADOSScanner wrapping rados.EnumeratePool with NEW WithBackref opt (cephimpl reads user.strata.backref inline via one GetXattr; ENODATA/ENOENT->absent). Red/green on memory (fake ChunkScanner): report no-delete, gc enqueues only orphan, healthy untouched under gc, overwritten-version-is-orphan, resume cursor, scan-error marks job, invalid-policy rejected. cephimpl WithBackref read CI-integration-tested. SPLIT to US-002b: restore policy (rebuild manifest from back-ref, shares US-004 grouping; StartReconcile rejects restore -> ErrReconcileInvalidPolicy) + S3-passthrough native-ListObjects scanner. ROADMAP Known-latent entry added."
     },
     {
       "id": "US-003",
@@ -157,6 +157,24 @@
       "priority": 8,
       "passes": false,
       "notes": ""
+    },
+    {
+      "id": "US-002b",
+      "title": "Reconcile restore policy + S3-passthrough chunk scanner (trailing split)",
+      "description": "As an operator with a meta-older-than-data skew (a chunk's owner exists in the data tier but its manifest row is gone), I want the reconcile restore policy to rebuild the manifest row from the back-reference so the object is GET-able again; and I want the S3-passthrough backend reconciled via its native ListObjects. SPLIT from US-002 because the restore policy shares the US-004 rebuild-index grouping logic (group chunks by {bucket_id, key, version_id}, order by chunk_idx, recompute ETag, set IsLatest via mtime) and is best landed alongside it; the S3 scanner is a second ChunkScanner impl. Until then meta.StartReconcile rejects restore with ErrReconcileInvalidPolicy.",
+      "acceptanceCriteria": [
+        "meta.IsValidReconcilePolicy accepts restore; the reconcile worker resolves an orphan under restore policy by rebuilding the manifest row from the back-reference (reusing the US-004 rebuild grouping: gather all chunks for {bucket_id, key, version_id}, order by chunk_idx, recompute single-part ETag, set IsLatest correct across a suspended-null version via the back-reference mtime)",
+        "version_id in the rebuilt manifest matches the back-reference so a subsequent reconcile pass sees the chunk as healthy (idempotent — a re-run does not double-rebuild)",
+        "Gaps (missing chunk_idx) under restore are flagged, not stitched into a short object; SSE objects are reported unrecoverable (plaintext-only, same boundary as US-004), never silently restored",
+        "S3-passthrough backend gets a reconcile.ChunkScanner that enumerates via native ListObjects + reads the x-amz-meta-strata-backref user-metadata (no pool-enumeration dependency); wired so the reconcile worker reconciles the S3 backend too",
+        "Red/green proof: seed a NON-SSE bucket, delete its manifest rows (keep chunks), reconcile in restore mode -> manifest rebuilt and the object GET-able again with correct bytes + version order; a removed middle chunk -> flagged gapped, not truncated; matches the US-002 report/gc memory red/green shape",
+        "make vet passes; memory + TiKV storetest contract; RADOS + S3-backend legs under integration",
+        "ROADMAP 'Known latent bugs' US-002-split entry closed in the same commit",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "Trailing split from US-002 (report + gc + RADOS scanner shipped). Pick up after US-004 (rebuild-index) so the restore policy reuses its grouping logic rather than duplicating it."
     }
   ]
 }

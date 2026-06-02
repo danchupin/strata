@@ -111,4 +111,48 @@ func TestPutChunksStampsBackrefXattr(t *testing.T) {
 			t.Errorf("chunk %d Mtime: want %v, got %v", i, mtime, ref.Mtime)
 		}
 	}
+
+	// US-002: EnumeratePool with WithBackref surfaces the same xattr inline so
+	// the reconcile worker attributes each chunk without a second round trip.
+	expectedOIDs := make(map[string]bool, len(m.Chunks))
+	for _, c := range m.Chunks {
+		expectedOIDs[c.OID] = true
+	}
+	seen := make(map[string]data.Backref, len(m.Chunks))
+	err = rados.EnumeratePool(ctx, beIface, rados.DefaultCluster,
+		rados.EnumerateOptions{
+			Pool:          pool,
+			Namespace:     rados.EnumerateAllNamespaces,
+			ChunkOIDsOnly: true,
+			WithBackref:   true,
+		},
+		func(o rados.PoolObject, _ rados.EnumerateCursor) error {
+			if !expectedOIDs[o.OID] {
+				return nil // some other test/object sharing the pool
+			}
+			if len(o.Backref) == 0 {
+				t.Errorf("WithBackref: chunk %s carried no back-reference bytes", o.OID)
+				return nil
+			}
+			br, derr := data.DecodeBackref(o.Backref)
+			if derr != nil {
+				t.Errorf("WithBackref: decode %s: %v", o.OID, derr)
+				return nil
+			}
+			seen[o.OID] = br
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("EnumeratePool WithBackref: %v", err)
+	}
+	for _, c := range m.Chunks {
+		br, ok := seen[c.OID]
+		if !ok {
+			t.Errorf("WithBackref: chunk %s not enumerated", c.OID)
+			continue
+		}
+		if br.BucketID != bid || br.Key != key || br.VersionID != ver {
+			t.Errorf("WithBackref: chunk %s identity mismatch: %+v", c.OID, br)
+		}
+	}
 }

@@ -241,6 +241,11 @@ dry_run      = false
 interval     = "30s"            # Poll cadence for the leader-elected reshard worker.
 batch_limit  = 500             # Object-walk page size; a crash resumes from the last watermark.
 
+[workers.reconcile]
+interval         = "30s"        # Poll cadence for the leader-elected reconcile worker (US-002 metadata-data-reconcile).
+checkpoint_every = 500          # Chunks scanned between cursor+counter watermark persists; a crash resumes from the cursor.
+                                # Pool-scan rate is set separately via STRATA_RECONCILE_SCAN_RATE (objects/sec; 0 = unlimited).
+
 [workers.audit_export]
 bucket   = ""                   # Required when audit-export worker enabled.
 prefix   = ""

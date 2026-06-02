@@ -371,6 +371,29 @@ var tableDDL = []string{
 		updated_at   timestamp,
 		finished_at  timestamp
 	)`,
+	// reconcile_jobs queues data-tier reconcile passes (US-002 metadata-data-
+	// reconcile). One row per job, keyed on a server-minted UUID id; the
+	// leader-elected reconcile worker scans the table for queued|running rows
+	// and drains them out-of-band. Low cardinality (single-digit in flight) so
+	// a partition-key-less full-table scan in ListReconcileJobs is fine.
+	`CREATE TABLE IF NOT EXISTS reconcile_jobs (
+		id             text PRIMARY KEY,
+		cluster        text,
+		pool           text,
+		namespace      text,
+		policy         text,
+		cursor         text,
+		state          text,
+		message        text,
+		scanned        bigint,
+		orphans_found  bigint,
+		orphans_gc     bigint,
+		orphans_report bigint,
+		absent_backref bigint,
+		errors         bigint,
+		created_at     timestamp,
+		updated_at     timestamp
+	)`,
 	`CREATE TABLE IF NOT EXISTS iam_managed_policies (
 		arn         text PRIMARY KEY,
 		name        text,

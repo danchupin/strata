@@ -131,6 +131,15 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   (queued|running|idle). Idempotent + resumable from the job
                   `LastKey` watermark (crash-safe). Cassandra moves rows;
                   memory/TiKV immediate-complete no-op.
+  reconcile    -> data-tier orphan-chunk detection after a restore (US-002
+                  metadata-data-reconcile). `--workers=reconcile`,
+                  `reconcile-leader` lease. `POST /admin/reconcile` QUEUES a
+                  job (202, async, `admin:Reconcile`); `GET /admin/reconcile
+                  ?id=` reads progress. Walks the RADOS pool via the US-000
+                  enumeration primitive (`reconcile.RADOSScanner`), reads each
+                  chunk's US-001 back-reference, looks up the owner in meta,
+                  resolves orphans by policy (report DEFAULT / gc; restore →
+                  US-002b). Idempotent + resumable from a `Cursor` watermark.
   strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
                   --target-key-id. Idempotent + resumable via rewrap_progress.
 ```
@@ -224,6 +233,40 @@ known) — deferred to trailing story `US-001b`, see ROADMAP "Known latent
 bugs". Hot-path cost (one SetXattr riding the existing WriteOp) is within
 bare-WriteFull p99 noise — see
 `docs/site/content/architecture/benchmarks/rados-ops.md`.
+
+**Reconcile worker — orphan-chunk detection (US-002 metadata-data-reconcile).**
+A leader-elected `reconcile` worker (`internal/reconcile/` +
+`cmd/strata/workers/reconcile.go`) repairs RADOS↔meta divergence after a
+restore. Execution model mirrors reshard (US-005): the admin POST
+`/admin/reconcile?cluster=&pool=&namespace=&policy=` QUEUES a job
+(`meta.StartReconcile` → 202); the worker drains queued jobs out-of-band on a
+tick (`GET /admin/reconcile?id=` reads progress). Job queue is a NEW
+`meta.ReconcileJob` (NOT the inline-goroutine `AdminJob`) — mirror it across all
+three backends (`StartReconcile`/`GetReconcileJob`/`UpdateReconcileJob`/
+`ListReconcileJobs`; `ListReconcileJobs` returns only queued|running, the
+worker's drain set; done/error rows persist for status polling). Resumable from
+a per-job `Cursor` watermark persisted every `CheckpointEvery` chunks.
+**Data→meta orphan detection NEEDS the back-reference**: the meta tier is not
+indexed by OID, so the only way to attribute a pool chunk to an owner is to
+read its US-001 back-reference, then `GetObject(bucketID, key, versionID)` and
+check `Manifest.Chunks` for the OID. Healthy = manifest references it;
+orphan = object/bucket gone OR manifest no longer references the OID
+(overwritten/rolled-back version). **Policies: report (DEFAULT — never delete)
++ gc (enqueue via `EnqueueChunkDeletion`).** restore (rebuild manifest from
+back-ref) is SPLIT to US-002b — `meta.StartReconcile` rejects it with
+`ErrReconcileInvalidPolicy` (shares US-004 grouping). A chunk with NO
+back-reference (`HasBackref=false`, legacy / `STRATA_CHUNK_BACKREF=false`) is
+counted (`AbsentBackref`) and reported, NEVER deleted — never destroy a chunk
+you can't attribute. The scan source is injected as a `reconcile.ChunkScanner`
+(`RADOSScanner` wraps `rados.EnumeratePool` with `WithBackref`, which surfaces
+the xattr inline via one GetXattr riding the same ioctx — `PoolObject.Backref`);
+tests inject a fake scanner so the classify/policy logic runs CI-green on the
+memory backend without RADOS. Metrics: `strata_reconcile_chunks_scanned_total`,
+`strata_reconcile_orphans_found_total{resolution}`,
+`strata_reconcile_errors_total` (+ add `reconcile` to
+`metrics.registeredWorkerNames`). Scan rate via `STRATA_RECONCILE_SCAN_RATE`
+(`rados.ScanRateFromEnv`, read in the data layer — koanf-exempt). S3-passthrough
+native-`ListObjects` scanner is also US-002b.
 
 `cephimpl` exposes its own `RadosCluster` interface (structurally identical
 to `internal/rebalance.RadosCluster`) so it does NOT need to import
