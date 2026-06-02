@@ -252,6 +252,21 @@ adding more, prove what is there.
   exposes only `state` + `LastKey` (no per-row migration counter), so the bar is honestly determinate at the
   endpoints (queued primer / animated running / complete) with the watermark cursor + elapsed time as the
   server-backed signals. A precise progress bar would need the worker to persist moved/total row counts (follow-up).
+  **US-011 (e2e pre-prod validation walkthrough) added — closes the cycle:** one composite pass
+  `make smoke-architecture-hardening` (`scripts/smoke-architecture-hardening.sh`) brings up both labs and exercises
+  the whole hardened path as six independent legs — A: Cassandra per-bucket non-default shard count + online 64→128
+  reshard under concurrent writes + crash-resume (delegates to `smoke-reshard.sh`, no fork); B: TiKV reshard parity
+  (immediate-complete no-op, object still readable); C: DeleteObjects batch (idempotent, missing-key = success row) +
+  versioned delete → `DeleteMarker`; D: policy-UNION-ACL anonymous GET (denied pre-policy, granted by an explicit
+  `s3:GetObject` Allow to `Principal:"*"`); E: the `/admin/v1` console reshard UI (`supported=true` Cassandra /
+  `false` TiKV-disabled + queue) plus the CI-only Playwright `reshard-progress.spec.ts`; F: plaintext
+  chunk-corruption fail-loud (`CGO_ENABLED=0` runs the `internal/data/{memory,rados}` CRC32C read-path tests — a live
+  gateway exposes no byte-flip hook by design, so corruption is injected at the backend test seam). Each leg
+  WARN-skips on a down lab and exits 0; `REQUIRE_LAB=1` promotes a down lab to a hard fail (CI). Runbook
+  `docs/site/content/operate/pre-prod-validation.md`; GO/NO-GO evidence note
+  `tasks/architecture-hardening-readiness.md` (pass/fail per leg; leg F observed-green locally, A–E PENDING-LAB with
+  the discriminating per-PR / dedicated-CI test cited per leg). Verdict: conditional GO pending one observed
+  `REQUIRE_LAB=1` run with both labs up.
 
 - ~~**P0/P1 — Cycle C: supply-chain-security (govulncheck + trivy + gosec CI gates + Dependabot + SECURITY.md + first release tag + SLSA L3 provenance + SPDX SBOM + cosign signing + license audit).**~~ — **Done.** Shipped via `ralph/supply-chain-security` cycle (US-001..US-011). 3 parallel CI scanners gated (govulncheck HIGH+CRITICAL / trivy CRITICAL / gosec MEDIUM); license audit gates banned licenses (forbidden + restricted classes). Dependabot weekly for Go × 2 + Actions + npm + Docker (patch-only auto-merge, grouped per ecosystem). SECURITY.md with 90-day SLA + GHSA-only disclosure. First release tag `v0.0.1-alpha.1` published; `ghcr.io/danchupin/strata` image signed via cosign keyless OIDC + SLSA L3 provenance + SPDX SBOM (slsa-framework/slsa-github-generator reusable workflow + anchore/sbom-action), all six release jobs green (run 26639369076). Operator verify recipe at /operate/image-verification.md with Kyverno + Sigstore Policy admission control examples. Composite smoke `make smoke-supply-chain` (`scripts/smoke-supply-chain.sh`) exercises every gate end-to-end. Pre-launch hard cutover — no behavior change. (commit `f22ab7e`)
 

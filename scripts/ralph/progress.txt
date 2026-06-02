@@ -347,3 +347,64 @@ Cycle: ralph/architecture-hardening
     truth" — the actual green `integration-cassandra` run must be confirmed on the
     PR before the branch-protection step is applied.
 ---
+
+## 2026-06-02 - US-011 End-to-end pre-prod validation walkthrough (CLOSES CYCLE)
+- Composite e2e walkthrough across BOTH labs in one pass. NEW
+  scripts/smoke-architecture-hardening.sh (make smoke-architecture-hardening,
+  added to .PHONY + recipe + a doc-comment block in Makefile). Six independent
+  legs, each PASS / WARN-skip (lab down) / FAIL:
+    A. Cassandra per-bucket non-default shard count + online 64->128 reshard
+       under concurrent writes + crash-resume — DELEGATES to smoke-reshard.sh
+       (no fork; reuse-harnesses rule). Propagates its exit 77 as a WARN-skip.
+    B. TiKV reshard parity (immediate-complete no-op): trigger via s3api admin
+       surface, poll to idle, assert shard_count flipped + object still reads.
+    C. DeleteObjects batch (idempotent: missing key = <Deleted> success row, 0
+       <Error>) + versioned delete -> x-amz-delete-marker:true. Runs on whichever
+       lab is up (TiKV preferred, Cassandra fallback).
+    D. Policy-UNION-ACL anon GET: asserts anon GET DENIED pre-policy (the
+       discriminator — else proof is vacuous), then PUT a Principal:"*"
+       s3:GetObject Allow, assert anon GET 200. Needs lab default
+       STRATA_AUTH_MODE=optional.
+    E. Console reshard UI via /admin/v1 cookie session: GET supported flag
+       (true Cassandra / false TiKV) + POST queue on Cassandra. Notes the
+       CI-only Playwright reshard-progress.spec.ts for the browser pass.
+    F. Plaintext chunk-corruption fail-loud: runs CGO_ENABLED=0 GOWORK=off
+       go test ./internal/data/{memory,rados}/ -run 'CRC|Checksum|FailsLoud'.
+       Runs even with NO lab up (a live gateway exposes no byte-flip hook by
+       design) — observed GREEN locally.
+- Runbook: docs/site/content/operate/pre-prod-validation.md (bring-up commands,
+  per-leg table, browser-pass note, env knobs).
+- Readiness note: tasks/architecture-hardening-readiness.md — pass/fail per leg
+  matrix. Leg F PASS (observed local); A-E PENDING-LAB each citing its green
+  discriminating per-PR/dedicated-CI test. Verdict: conditional GO pending one
+  observed REQUIRE_LAB=1 run with both labs up. Did NOT fabricate a green lab run
+  (no labs up locally + cgo block) — faithful-reporting + test-discipline rules.
+- ROADMAP: appended US-011 closing paragraph to the headline cycle P1 entry.
+- make vet: NO Go source changed (shell + Makefile + 2 markdown + prd/progress/
+  ROADMAP), so go vet ./... is unaffected by this story; local cgo/Xcode block is
+  pre-existing and orthogonal. Composite self-check on bare box: A-E WARN-skip,
+  F PASS, overall PASS exit 0.
+- Files: scripts/smoke-architecture-hardening.sh (new), Makefile,
+  docs/site/content/operate/pre-prod-validation.md (new),
+  tasks/architecture-hardening-readiness.md (new), ROADMAP.md, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - Composite/cycle-closing smoke pattern: aggregate per-leg PASS/WARN/FAIL with a
+    FAILURES counter (mirror scripts/smoke-supply-chain.sh), each leg lab_or_skip
+    its base, WARN-skip => exit 0, REQUIRE_LAB=1 => skip becomes FAIL. DELEGATE the
+    heavy single-feature legs to the existing per-feature smoke (smoke-reshard.sh)
+    instead of re-implementing — catch its exit 77 and downgrade to WARN.
+  - A live gateway has NO production chunk-corruption hook (by design — it would be
+    a data-integrity hole). So the e2e "fail-loud" leg can't byte-flip via S3; run
+    the data-layer CRC tests directly. internal/data/{memory,rados} build
+    CGO_ENABLED=0, so leg F runs even on the cgo-blocked macOS box — the only leg
+    that needs no lab.
+  - Policy-UNION-ACL e2e discriminator: assert anon GET is DENIED before attaching
+    the policy. Lab default STRATA_AUTH_MODE=optional lets anon reach the gate
+    (owner!=anon => ACL denies); the explicit policy Allow then unions to 200. If
+    the pre-policy GET already 200s, the lab isn't gating and the leg is
+    inconclusive (WARN, not a false PASS).
+  - Two reshard admin surfaces (recap): s3api /admin/bucket/reshard (SigV4,
+    owner==iam-root, used by leg B trigger) vs adminapi /admin/v1/buckets/{b}/reshard
+    (cookie session via POST /admin/v1/auth/login, used by leg E console). They are
+    NOT interchangeable — different auth.
+---

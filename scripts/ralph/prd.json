@@ -204,8 +204,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 12,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Composite e2e walkthrough scripts/smoke-architecture-hardening.sh (make smoke-architecture-hardening) + runbook docs/site/content/operate/pre-prod-validation.md + readiness note tasks/architecture-hardening-readiness.md. Leg F (CRC fail-loud) observed green locally CGO_ENABLED=0; legs A-E lab-gated (each has a green discriminating per-PR/dedicated-CI test). make vet unaffected (no Go source changed)."
     }
   ]
 }
