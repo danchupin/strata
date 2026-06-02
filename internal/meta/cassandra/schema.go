@@ -389,6 +389,7 @@ var tableDDL = []string{
 		orphans_found  bigint,
 		orphans_gc     bigint,
 		orphans_report bigint,
+		orphans_restore bigint,
 		absent_backref bigint,
 		errors         bigint,
 		bucket              text,
@@ -493,6 +494,7 @@ var alterStatements = []string{
 	`ALTER TABLE reconcile_jobs ADD dangling_found bigint`,
 	`ALTER TABLE reconcile_jobs ADD dangling_quarantine bigint`,
 	`ALTER TABLE reconcile_jobs ADD dangling_report bigint`,
+	`ALTER TABLE reconcile_jobs ADD orphans_restore bigint`,
 }
 
 func isColumnAlreadyExists(err error) bool {

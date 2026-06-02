@@ -96,6 +96,11 @@ type ChunkProber interface {
 type Config struct {
 	Meta    meta.Store
 	Scanner ChunkScanner
+	// Data is the data backend the restore policy (US-002b) reads chunk bytes
+	// from to recompute the single-part ETag of a rebuilt manifest. Nil when the
+	// backend cannot serve chunks for restore — a restore job then errors and
+	// rebuilds nothing (report/gc passes never touch it).
+	Data data.Backend
 	// Prober answers chunk-existence for the dangling-manifest pass (US-003).
 	// Nil when the data backend cannot probe — a dangling job then errors and
 	// quarantines nothing.
@@ -207,10 +212,27 @@ func (w *Worker) runJob(ctx context.Context, job *meta.ReconcileJob) error {
 	if w.cfg.Scanner == nil {
 		return errors.New("reconcile: no chunk scanner configured for this data backend")
 	}
+	// The restore policy (US-002b) rebuilds manifest rows from the grouped
+	// orphan chunks AFTER the scan drains (a version's chunks are spread across
+	// the pool walk), so it needs to read chunk bytes to recompute the ETag.
+	// Fail fast if no data backend is wired rather than scan-then-fail.
+	if job.Policy == meta.ReconcilePolicyRestore && w.cfg.Data == nil {
+		return errors.New("reconcile: restore policy requires a data backend (none configured)")
+	}
+	// restoreAcc is in-memory and rebuilt empty each runJob, so a crash-resumed
+	// restore (scan restarts at job.Cursor) only sees chunks at-or-after the
+	// watermark. A multi-chunk version split across the persisted cursor looks
+	// gapped on resume and is REPORTED, not restored — fail-safe (never stitches
+	// a short object), but a crashed restore may need a full re-run (cursor "")
+	// to rebuild a straddling version. See ROADMAP "Known latent bugs".
+	var restoreAcc map[restoreKey]*restoreGroup
+	if job.Policy == meta.ReconcilePolicyRestore {
+		restoreAcc = make(map[restoreKey]*restoreGroup)
+	}
 	scope := ScanScope{Cluster: job.Cluster, Pool: job.Pool, Namespace: job.Namespace}
 	sinceCheckpoint := 0
 	scanErr := w.cfg.Scanner.Scan(ctx, scope, job.Cursor, func(c ScannedChunk, cursor string) error {
-		if err := w.classify(ctx, job, c); err != nil {
+		if err := w.classify(ctx, job, c, restoreAcc); err != nil {
 			return err
 		}
 		job.Cursor = cursor
@@ -228,6 +250,10 @@ func (w *Worker) runJob(ctx context.Context, job *meta.ReconcileJob) error {
 		_ = w.cfg.Meta.UpdateReconcileJob(ctx, job)
 		return scanErr
 	}
+	// Resolve the accumulated restore groups now the full chunk set is known.
+	if restoreAcc != nil {
+		w.resolveRestores(ctx, job, restoreAcc)
+	}
 	job.State = meta.ReconcileStateDone
 	job.Message = ""
 	if err := w.cfg.Meta.UpdateReconcileJob(ctx, job); err != nil {
@@ -237,8 +263,11 @@ func (w *Worker) runJob(ctx context.Context, job *meta.ReconcileJob) error {
 }
 
 // classify decides whether c is an orphan and applies the job policy. It
-// mutates the job's in-memory counters; the caller persists them.
-func (w *Worker) classify(ctx context.Context, job *meta.ReconcileJob, c ScannedChunk) error {
+// mutates the job's in-memory counters; the caller persists them. restoreAcc is
+// non-nil only for the restore policy (US-002b): a restorable orphan is
+// accumulated there and resolved after the scan drains (its sibling chunks are
+// spread across the pool walk).
+func (w *Worker) classify(ctx context.Context, job *meta.ReconcileJob, c ScannedChunk, restoreAcc map[restoreKey]*restoreGroup) error {
 	job.Scanned++
 	w.cfg.Obs.ChunkScanned()
 
@@ -251,6 +280,7 @@ func (w *Worker) classify(ctx context.Context, job *meta.ReconcileJob, c Scanned
 	}
 
 	br := c.Backref
+	objectAbsent := false
 	obj, err := w.cfg.Meta.GetObject(ctx, br.BucketID, br.Key, br.VersionID)
 	switch {
 	case err == nil:
@@ -258,9 +288,12 @@ func (w *Worker) classify(ctx context.Context, job *meta.ReconcileJob, c Scanned
 			return nil // healthy: the live manifest references this chunk.
 		}
 		// Object exists but this version's manifest no longer references the
-		// chunk (overwritten/rolled-back version) -> orphan.
+		// chunk (overwritten/rolled-back version) -> orphan, but the version
+		// row is INTACT (it carries its own valid manifest).
 	case errors.Is(err, meta.ErrObjectNotFound), errors.Is(err, meta.ErrBucketNotFound):
-		// No manifest references this chunk -> orphan.
+		// No manifest references this chunk -> orphan, and the version row is
+		// genuinely absent (the meta-older-than-data skew restore repairs).
+		objectAbsent = true
 	default:
 		// Uncertain (transient meta error): never delete on doubt. Count an
 		// error and skip.
@@ -271,6 +304,8 @@ func (w *Worker) classify(ctx context.Context, job *meta.ReconcileJob, c Scanned
 
 	job.OrphansFound++
 	switch job.Policy {
+	case meta.ReconcilePolicyRestore:
+		w.classifyRestore(ctx, job, c, objectAbsent, restoreAcc)
 	case meta.ReconcilePolicyGC:
 		ref := data.ChunkRef{
 			Cluster:   c.Cluster,

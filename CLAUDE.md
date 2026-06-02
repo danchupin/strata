@@ -138,8 +138,15 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   ?id=` reads progress. Walks the RADOS pool via the US-000
                   enumeration primitive (`reconcile.RADOSScanner`), reads each
                   chunk's US-001 back-reference, looks up the owner in meta,
-                  resolves orphans by policy (report DEFAULT / gc; restore →
-                  US-002b). Idempotent + resumable from a `Cursor` watermark.
+                  resolves orphans by policy (report DEFAULT / gc / restore).
+                  restore (US-002b) rebuilds the manifest row from the
+                  back-reference for a genuinely-absent version (reuses the
+                  US-004 grouping via shared `reconcile.OrderChunks`; recomputes
+                  ETag from `Config.Data` bytes; IsLatest by mtime) — overwritten
+                  versions + gaps reported (never clobbered/stitched), SSE
+                  reported unrecoverable. Idempotent + resumable from a `Cursor`
+                  watermark (restore's straddling-version resume caveat: ROADMAP
+                  Known latent bugs).
                   US-003 adds the inverse DANGLING pass (meta→data): a
                   bucket-scoped job (`POST /admin/reconcile?bucket=&policy=`)
                   walks every object version's manifest and probes each chunk
@@ -283,9 +290,17 @@ read its US-001 back-reference, then `GetObject(bucketID, key, versionID)` and
 check `Manifest.Chunks` for the OID. Healthy = manifest references it;
 orphan = object/bucket gone OR manifest no longer references the OID
 (overwritten/rolled-back version). **Policies: report (DEFAULT — never delete)
-+ gc (enqueue via `EnqueueChunkDeletion`).** restore (rebuild manifest from
-back-ref) is SPLIT to US-002b — `meta.StartReconcile` rejects it with
-`ErrReconcileInvalidPolicy` (shares US-004 grouping). A chunk with NO
++ gc (enqueue via `EnqueueChunkDeletion`) + restore (US-002b — rebuild the
+manifest row from the back-reference).** restore needs `reconcile.Config.Data`
+(reads chunk bytes to recompute the ETag): it accumulates orphan chunks during
+the scan, groups by `{bucket,key,version}` via shared `reconcile.OrderChunks`
+(US-004 `rebuild.go` delegates to it), recomputes ETag+CRC, sets IsLatest by
+back-ref mtime. **Restore writes ONLY when the version row is genuinely absent**
+— an overwritten version (row present, references a different OID) is reported,
+NEVER clobbered; a gap is reported (never stitched short); an SSE object is
+reported unrecoverable (plaintext-only, same boundary as rebuild-index).
+Idempotent (a re-run sees the rebuilt chunk healthy). New `OrphansRestore`
+counter (3-backend lockstep, additive `orphans_restore` Cassandra column). A chunk with NO
 back-reference (`HasBackref=false`, legacy / `STRATA_CHUNK_BACKREF=false`) is
 counted (`AbsentBackref`) and reported, NEVER deleted — never destroy a chunk
 you can't attribute. The scan source is injected as a `reconcile.ChunkScanner`
@@ -296,8 +311,12 @@ memory backend without RADOS. Metrics: `strata_reconcile_chunks_scanned_total`,
 `strata_reconcile_orphans_found_total{resolution}`,
 `strata_reconcile_errors_total` (+ add `reconcile` to
 `metrics.registeredWorkerNames`). Scan rate via `STRATA_RECONCILE_SCAN_RATE`
-(`rados.ScanRateFromEnv`, read in the data layer — koanf-exempt). S3-passthrough
-native-`ListObjects` scanner is also US-002b.
+(`rados.ScanRateFromEnv`, read in the data layer — koanf-exempt). **S3-passthrough
+scanner (US-002b):** new `data.ChunkLister` capability (`s3.Backend.ListChunks`
+— native `ListObjectsV2` + per-object `x-amz-meta-strata-backref` HEAD, resumable
+via `StartAfter`) driven by `reconcile.S3Scanner`; the worker
+(`cmd/strata/workers/reconcile.go::chunkScanner`) picks S3Scanner vs RADOSScanner
+by backend capability. RADOS + S3 real-backend legs are integration-only.
 
 **Reconcile worker — dangling-manifest detection (US-003 metadata-data-reconcile).**
 The INVERSE direction (meta→data): a manifest that points at a chunk the data

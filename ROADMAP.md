@@ -645,14 +645,29 @@ Non-goals:
   fatal). Closing it needs either a re-stamp pass at Complete (extra round-trip per part chunk — defeats the
   "same WriteOp" cost goal) or carrying the upload identity in the part xattr and rewriting the version on
   Complete. Tracked as the trailing `US-001b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-001)
-- **P3 — Reconcile `restore` policy + S3-passthrough chunk scanner deferred (US-002 split).** The reconcile worker
-  (US-002) ships orphan-chunk detection + the `report` (default) and `gc` policies over the RADOS pool via the
-  US-000 enumeration primitive (`reconcile.RADOSScanner` → `rados.EnumeratePool` with `WithBackref`). Two pieces are
-  split out: (1) the `restore` policy (rebuild the manifest row from the back-reference for the meta-older-than-data
-  skew) — it shares the US-004 `rebuild-index` grouping logic, so `meta.StartReconcile` rejects `restore` with
-  `ErrReconcileInvalidPolicy` until then; (2) the S3-passthrough backend's native-`ListObjects` chunk scanner (the
-  RADOS leg is wired + CI-integration-tested; the S3 leg reuses the same `ChunkScanner` seam). Tracked as the trailing
-  `US-002b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-002)
+- ~~**P3 — Reconcile `restore` policy + S3-passthrough chunk scanner deferred (US-002 split).**~~ — **Done.**
+  US-002b. `meta.IsValidReconcilePolicy` now accepts `restore`; the reconcile worker resolves an orphan under
+  `restore` by rebuilding the manifest row from the back-reference — it accumulates orphan chunks during the scan,
+  groups them by `{bucket_id, key, version_id}` via the now-shared `reconcile.OrderChunks` (US-004 `rebuild.go`
+  delegates to it — one gap-detection rule), orders by `chunk_idx`, recomputes the single-part ETag + per-chunk
+  CRC32C from the rebuilt bytes (`reconcile.Config.Data` reads them), and sets `IsLatest` by back-reference `mtime`.
+  Safety rails identical to `rebuild-index`: restore writes ONLY when the version row is genuinely absent (an
+  overwritten version — row present, references a different OID — is reported, NEVER clobbered), a gapped sequence is
+  reported (never stitched short), an SSE object is reported unrecoverable (plaintext-only). Idempotent (a re-run sees
+  the rebuilt chunk as healthy). New `ReconcileJob.OrphansRestore` counter (memory/TiKV/Cassandra lockstep, additive
+  `orphans_restore` column + ALTER) + `resolution=restore` on `strata_reconcile_orphans_found_total`; surfaced in the
+  web console (orphan policy picker + "Restored" summary counter). S3-passthrough scanner: new `data.ChunkLister`
+  capability (`s3.Backend.ListChunks` — native `ListObjectsV2` + per-object `x-amz-meta-strata-backref` HEAD,
+  resumable via `StartAfter`) driven by `reconcile.S3Scanner`; the worker picks S3Scanner vs RADOSScanner by backend
+  capability. Memory red/green proven; RADOS + S3 real-backend legs are integration-only. (`ralph/metadata-data-reconcile` US-002b)
+- **P3 — Reconcile `restore` crash-resume can defer a version whose chunks straddle the checkpoint cursor.** The
+  restore accumulator (`reconcile.runJob`) is in-memory and rebuilt empty on each pass, so a crash-resumed restore
+  (scan restarts at `job.Cursor`) only accumulates chunks at-or-after the watermark. A multi-chunk version split across
+  the persisted cursor looks gapped on resume and is REPORTED (not restored). This is **fail-safe** — it never stitches
+  a short object and the chunks stay orphans for a later pass — but a crashed restore may need a full re-run
+  (`cursor=""`) to rebuild a straddling version, so the "resumable from a Cursor watermark" guarantee is weaker for
+  `restore` than for `report`/`gc`. Fix direction: persist the accumulator, order the scan so a version's chunks are
+  contiguous, or only resolve groups whose `chunk_idx=0` was seen this pass. (`ralph/metadata-data-reconcile` US-002b)
 - **P3 — Reconcile dangling-manifest `delete` resolution + RADOS/S3 chunk prober deferred (US-003 split).** The
   reconcile worker now ships the meta→data dangling-manifest pass (US-003): a bucket-scoped job walks every object
   version's manifest and probes each chunk via `reconcile.ChunkProber` (`data.ChunkStater`), resolving a dangling

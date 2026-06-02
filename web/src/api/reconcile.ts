@@ -7,8 +7,10 @@
 //
 // Two passes, discriminated by which params are set:
 //   - ORPHAN  (data→meta): cluster + pool (+ optional namespace). Policy is
-//     report (default) or gc. Walks the RADOS pool, attributes each chunk to an
-//     owner via its back-reference, flags chunks no manifest references.
+//     report (default), gc, or restore. Walks the RADOS pool, attributes each
+//     chunk to an owner via its back-reference, flags chunks no manifest
+//     references. restore (US-002b) rebuilds the manifest row from the
+//     back-reference for a genuinely-absent version (plaintext-only).
 //   - DANGLING (meta→data): bucket (a bucket NAME). Policy is report (default)
 //     or quarantine. Walks every object version's manifest and probes each
 //     chunk; a manifest with a missing chunk is dangling.
@@ -21,9 +23,9 @@ export type ReconcileState = 'queued' | 'running' | 'done' | 'error';
 
 export type ReconcilePass = 'orphan' | 'dangling';
 
-// Orphan-pass policies. restore is deferred to US-002b — StartReconcile rejects
-// it (400) so the picker does not offer it.
-export type OrphanPolicy = 'report' | 'gc';
+// Orphan-pass policies. restore (US-002b) rebuilds the manifest row from the
+// back-reference for a genuinely-absent version.
+export type OrphanPolicy = 'report' | 'gc' | 'restore';
 // Dangling-pass policies.
 export type DanglingPolicy = 'report' | 'quarantine';
 
@@ -41,6 +43,7 @@ export interface ReconcileJob {
   orphans_found: number;
   orphans_gc: number;
   orphans_report: number;
+  orphans_restore: number;
   absent_backref: number;
   manifests_scanned: number;
   healthy: number;

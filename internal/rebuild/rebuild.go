@@ -434,17 +434,9 @@ func (r *Rebuilder) readChunk(ctx context.Context, ref data.ChunkRef) ([]byte, e
 }
 
 // orderChunks returns the chunks of g in chunk_idx order [0..n-1] and whether
-// the sequence has a gap (a missing index). A gapped sequence must NEVER be
-// stitched into a short object.
+// the sequence has a gap. It delegates to reconcile.OrderChunks so the
+// gap-detection rule lives in exactly one place (shared with the US-002b
+// restore policy).
 func orderChunks(g *groupState) ([]data.ChunkRef, bool) {
-	n := len(g.chunks)
-	out := make([]data.ChunkRef, 0, n)
-	for i := 0; i < n; i++ {
-		ref, ok := g.chunks[i]
-		if !ok {
-			return nil, true // gap: index i missing in a 0..n-1 sequence
-		}
-		out = append(out, ref)
-	}
-	return out, false
+	return reconcile.OrderChunks(g.chunks)
 }

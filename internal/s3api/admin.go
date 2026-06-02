@@ -458,10 +458,11 @@ type adminReconcileResponse struct {
 	State         string `json:"state"`
 	Cursor        string `json:"cursor,omitempty"`
 	Scanned       int64  `json:"scanned"`
-	OrphansFound  int64  `json:"orphans_found"`
-	OrphansGC     int64  `json:"orphans_gc"`
-	OrphansReport int64  `json:"orphans_report"`
-	AbsentBackref int64  `json:"absent_backref"`
+	OrphansFound   int64 `json:"orphans_found"`
+	OrphansGC      int64 `json:"orphans_gc"`
+	OrphansReport  int64 `json:"orphans_report"`
+	OrphansRestore int64 `json:"orphans_restore"`
+	AbsentBackref  int64 `json:"absent_backref"`
 	// Dangling-pass (US-003) counters.
 	ManifestsScanned   int64  `json:"manifests_scanned"`
 	Healthy            int64  `json:"healthy"`
@@ -482,8 +483,10 @@ type adminReconcileResponse struct {
 // Two directions, selected by the bucket param:
 //   - ORPHAN pass (US-002, data->meta): bucket absent. Params: cluster
 //     (required), pool (required), namespace (optional — default namespace;
-//     \x01 for all namespaces), policy (report|gc, default report). restore is
-//     rejected (US-002b).
+//     \x01 for all namespaces), policy (report|gc|restore, default report).
+//     restore (US-002b) rebuilds the manifest row from the back-reference for a
+//     genuinely-absent version (plaintext-only; gaps + SSE reported, never
+//     served).
 //   - DANGLING pass (US-003, meta->data): bucket=<name> present. Walks the
 //     bucket's manifests and probes each chunk; policy (report|quarantine,
 //     default report). cluster/pool are not required.
@@ -572,6 +575,7 @@ func reconcileResponse(job *meta.ReconcileJob) adminReconcileResponse {
 		OrphansFound:       job.OrphansFound,
 		OrphansGC:          job.OrphansGC,
 		OrphansReport:      job.OrphansReport,
+		OrphansRestore:     job.OrphansRestore,
 		AbsentBackref:      job.AbsentBackref,
 		ManifestsScanned:   job.ManifestsScanned,
 		Healthy:            job.Healthy,

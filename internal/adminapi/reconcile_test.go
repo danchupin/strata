@@ -270,16 +270,22 @@ func TestReconcileStart_OrphanRequiresClusterPool(t *testing.T) {
 	}
 }
 
-// TestReconcileStart_RejectsRestorePolicy: restore is deferred to US-002b;
-// StartReconcile rejects it with ErrReconcileInvalidPolicy, surfaced as a 400
-// so the picker never offers an unsupported destructive policy silently.
-func TestReconcileStart_RejectsRestorePolicy(t *testing.T) {
+// TestReconcileStart_AcceptsRestorePolicy: restore is an accepted orphan-pass
+// policy (US-002b — rebuild the manifest row from the back-reference). It queues
+// (202); a bogus policy is the one rejected with 400.
+func TestReconcileStart_AcceptsRestorePolicy(t *testing.T) {
 	s := newTestServer()
 
 	rr := putAdmin(t, s, "alice", http.MethodPost, "/admin/v1/reconcile",
 		reconcilePostRequest{Cluster: "ceph-a", Pool: "strata-data", Policy: meta.ReconcilePolicyRestore})
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%s want 400", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s want 202", rr.Code, rr.Body.String())
+	}
+
+	bogus := putAdmin(t, s, "alice", http.MethodPost, "/admin/v1/reconcile",
+		reconcilePostRequest{Cluster: "ceph-a", Pool: "strata-data", Policy: "bogus"})
+	if bogus.Code != http.StatusBadRequest {
+		t.Fatalf("bogus status=%d body=%s want 400", bogus.Code, bogus.Body.String())
 	}
 }
 

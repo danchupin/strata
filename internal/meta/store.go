@@ -423,8 +423,14 @@ type ReconcileJob struct {
 	OrphansFound  int64
 	OrphansGC     int64
 	OrphansReport int64
-	AbsentBackref int64
-	Errors        int64
+	// OrphansRestore counts orphan chunks whose manifest row was rebuilt from
+	// the back-reference (US-002b restore policy). An orphan is restored only
+	// when its version row is genuinely absent; an overwritten version (manifest
+	// present, references a different OID), a gapped sequence, or an SSE object
+	// falls back to OrphansReport (never clobbered, never served as ciphertext).
+	OrphansRestore int64
+	AbsentBackref  int64
+	Errors         int64
 	// Dangling-pass (US-003) counters: ManifestsScanned counts object versions
 	// walked; Healthy counts versions whose chunks all exist; DanglingFound
 	// counts versions with a missing chunk, broken down into DanglingQuarantine
@@ -447,8 +453,14 @@ const (
 	// queue (the object was rolled back; the chunk is genuinely unreferenced).
 	ReconcilePolicyGC = "gc"
 	// ReconcilePolicyRestore rebuilds the manifest row from the back-reference
-	// (meta-older-than-data skew). DEFERRED to the trailing US-002b — shares
-	// the US-004 rebuild grouping; StartReconcile rejects it until then.
+	// (meta-older-than-data skew: the chunk's owner survives in the data tier
+	// but its manifest row is gone). Reuses the US-004 rebuild grouping (gather
+	// every chunk for {bucket_id, key, version_id}, order by chunk_idx,
+	// recompute the single-part ETag, set IsLatest via the back-reference
+	// mtime). PLAINTEXT-ONLY (same boundary as rebuild-index): an SSE object is
+	// reported unrecoverable, never restored as ciphertext. Restore writes a
+	// version ONLY when its row is genuinely absent — an overwritten version
+	// still carries a valid manifest and is reported (never clobbered).
 	ReconcilePolicyRestore = "restore"
 	// ReconcilePolicyQuarantine is a DANGLING-pass (US-003) policy: a manifest
 	// whose chunk is missing has its object version marked unreadable
@@ -463,11 +475,11 @@ const (
 )
 
 // IsValidReconcilePolicy reports whether p is a policy the US-002 ORPHAN pass
-// can execute. restore is a recognised constant but not yet supported
-// (US-002b), so it returns false here — StartReconcile maps that to
-// ErrReconcileInvalidPolicy.
+// can execute: report (count only), gc (enqueue the orphan for deletion), or
+// restore (US-002b — rebuild the manifest row from the back-reference).
+// StartReconcile maps an unrecognised policy to ErrReconcileInvalidPolicy.
 func IsValidReconcilePolicy(p string) bool {
-	return p == ReconcilePolicyReport || p == ReconcilePolicyGC
+	return p == ReconcilePolicyReport || p == ReconcilePolicyGC || p == ReconcilePolicyRestore
 }
 
 // IsValidDanglingPolicy reports whether p is a policy the US-003 DANGLING pass

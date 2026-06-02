@@ -26,6 +26,33 @@ type ChunkStater interface {
 	ChunkExists(ctx context.Context, ref ChunkRef) (bool, error)
 }
 
+// ListedChunk is one data-tier chunk surfaced by ChunkLister: its OID, byte
+// size, and raw (still-encoded) US-001 back-reference payload — empty when the
+// backing object carries none (legacy / STRATA_CHUNK_BACKREF=false). The
+// reconcile worker decodes Backref itself so a malformed payload degrades to
+// "no back-reference" rather than aborting the walk.
+type ListedChunk struct {
+	OID     string
+	Size    int64
+	Backref []byte
+}
+
+// ChunkLister is the optional capability a data backend advertises to enumerate
+// its chunks WITHOUT a pool-enumeration primitive — the S3-passthrough backend
+// implements it via a native ListObjects over its backing bucket plus a
+// per-object metadata read of x-amz-meta-strata-backref (US-002b). The RADOS
+// backend does NOT implement it (it uses the US-000 EnumeratePool primitive via
+// reconcile.RADOSScanner instead); the reconcile worker type-asserts the live
+// backend and picks reconcile.S3Scanner when this surface is present.
+//
+// List visits each chunk in the scope, handing visit a resume cursor pointing
+// at-or-after that chunk so the worker can persist + resume the walk. startCursor
+// "" starts from the front. The implementation decodes the opaque string into
+// its native continuation token.
+type ChunkLister interface {
+	ListChunks(ctx context.Context, cluster, class, startCursor string, visit func(ListedChunk, string) error) error
+}
+
 // MultipartBackend is the optional capability surface for data backends that
 // can map a Strata multipart upload 1:1 onto their own multipart protocol
 // (US-010 S3-over-S3). Today only the s3 backend implements it; the gateway

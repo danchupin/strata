@@ -2574,12 +2574,36 @@ func caseAdminJobRoundTrip(t *testing.T, s meta.Store) {
 func caseReconcileJobRoundTrip(t *testing.T, s meta.Store) {
 	ctx := context.Background()
 
-	// restore is a recognised constant but not yet supported (US-002b).
-	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyRestore); err != meta.ErrReconcileInvalidPolicy {
-		t.Errorf("restore policy: got %v want ErrReconcileInvalidPolicy", err)
-	}
 	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", "bogus"); err != meta.ErrReconcileInvalidPolicy {
 		t.Errorf("bogus policy: got %v want ErrReconcileInvalidPolicy", err)
+	}
+
+	// restore is an orphan-pass policy (US-002b) — accepted, and its
+	// OrphansRestore counter round-trips through the backend's persistence.
+	rj, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyRestore)
+	if err != nil {
+		t.Fatalf("start restore: %v", err)
+	}
+	if rj.Policy != meta.ReconcilePolicyRestore {
+		t.Fatalf("restore start round-trip: %+v", rj)
+	}
+	rj.State = meta.ReconcileStateRunning
+	rj.OrphansFound = 5
+	rj.OrphansRestore = 4
+	rj.OrphansReport = 1
+	if err := s.UpdateReconcileJob(ctx, rj); err != nil {
+		t.Fatalf("update restore: %v", err)
+	}
+	gotRJ, err := s.GetReconcileJob(ctx, rj.ID)
+	if err != nil {
+		t.Fatalf("get restore: %v", err)
+	}
+	if gotRJ.OrphansFound != 5 || gotRJ.OrphansRestore != 4 || gotRJ.OrphansReport != 1 {
+		t.Fatalf("restore counter round-trip: %+v", gotRJ)
+	}
+	gotRJ.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, gotRJ); err != nil {
+		t.Fatalf("complete restore: %v", err)
 	}
 	// quarantine is a dangling-only policy — invalid for an orphan (no-bucket) job.
 	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyQuarantine); err != meta.ErrReconcileInvalidPolicy {

@@ -117,8 +117,13 @@ func TestAdmin_Reconcile_QueueAndStatus(t *testing.T) {
 func TestAdmin_Reconcile_RejectsBadInput(t *testing.T) {
 	h := newNotifyHarness(t)
 
-	// restore policy is deferred to US-002b -> 400.
+	// restore policy is an accepted orphan-pass policy (US-002b) -> 202.
 	resp := h.doString("POST", "/admin/reconcile?cluster=ceph-a&pool=strata-data&policy=restore", "", testPrincipalHeader, s3api.IAMRootPrincipal)
+	h.mustStatus(resp, http.StatusAccepted)
+	resp.Body.Close()
+
+	// Bogus policy -> 400.
+	resp = h.doString("POST", "/admin/reconcile?cluster=ceph-a&pool=strata-data&policy=bogus", "", testPrincipalHeader, s3api.IAMRootPrincipal)
 	h.mustStatus(resp, http.StatusBadRequest)
 	resp.Body.Close()
 

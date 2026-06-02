@@ -515,3 +515,55 @@ Cycle: ralph/metadata-data-reconcile
   - runbook lives at /operate/metadata-data-reconcile/ (NOT /operate/reconcile/);
     the rebuild-index card link target is REBUILD_RUNBOOK_URL in Reconcile.tsx.
 ---
+
+## 2026-06-03 - US-002b — Reconcile restore policy + S3-passthrough chunk scanner
+- Implemented the `restore` reconcile policy (meta-older-than-data skew: rebuild the
+  manifest row from the data-tier orphan chunk's US-001 back-reference) + the
+  S3-passthrough native-ListObjects chunk scanner.
+- Picked US-002b (prio 10) over US-007 (prio 8, highest): US-007 is the e2e validation
+  walkthrough and has HARD runtime deps on restore (US-002b) + rebuild-on-real-RADOS
+  (US-004b). `StartReconcile` rejected restore until now, so doing US-007 first would
+  produce a broken/dishonest artifact. US-002b is the highest-priority UNBLOCKABLE story
+  and is CI-verifiable on the memory backend.
+- Files changed:
+  - internal/meta/store.go — IsValidReconcilePolicy accepts restore; new ReconcileJob.OrphansRestore
+  - internal/meta/cassandra/{reconcile.go,schema.go} — orphans_restore column (CREATE + idempotent ALTER + INSERT/UPDATE/scan lockstep)
+  - internal/reconcile/restore.go (NEW) — classifyRestore/resolveRestores/restoreVersion + exported OrderChunks
+  - internal/reconcile/reconcile.go — runJob threads restoreAcc; classify tracks objectAbsent + dispatches restore
+  - internal/reconcile/scan_s3.go (NEW) — S3Scanner over data.ChunkLister
+  - internal/data/backend.go — new data.ChunkLister + data.ListedChunk capability
+  - internal/data/s3/reconcile.go (NEW) — s3.Backend.ListChunks (ListObjectsV2 + HeadObject backref) — integration-only
+  - internal/rebuild/rebuild.go — orderChunks delegates to reconcile.OrderChunks (dedup, no cycle)
+  - cmd/strata/workers/reconcile.go — wires Config.Data + chunkScanner() capability-pick
+  - internal/metrics/metrics.go — resolution=restore label
+  - internal/s3api/admin.go + internal/adminapi/reconcile.go — orphans_restore in responses; comments
+  - web/src/api/reconcile.ts + web/src/pages/Reconcile.tsx — restore policy option + "Restored" counter
+  - storetest/contract.go — restore accepted + OrphansRestore round-trip; 2 stale "rejects restore" tests flipped to accept
+- Red/green (memory): TestReconcileRestoreRebuildsManifest (rebuild + GET-able bytes + idempotent),
+  GappedNotStitched, SSEUnrecoverable, NeverClobbersOverwrittenVersion (critical safety),
+  NoDataBackend, IsLatestByMtime (mutation-verified discriminator), TestS3ScannerDecodesBackref, TestOrderChunks.
+- Domain review (correctness + tests subagents): NO blocking findings. Applied 3 non-blocking fixes:
+  tightened IsLatest test to genuinely discriminate mtime vs version_id (was a coverage hole),
+  tightened the resolve re-probe guard to match classify's objectAbsent intent, documented the
+  straddling-checkpoint restore-resume fail-safe (code comment + new ROADMAP Known-latent-bugs P3).
+- make vet + go build ./... clean; full unit suite (51 pkgs) green. RADOS + S3 real-backend legs are
+  integration-only (not runnable on this macOS/lima box) — noted, consistent with US-002/US-003 splits.
+- **Learnings for future iterations:**
+  - CYCLE-AVOIDANCE: rebuild imports reconcile (for ChunkScanner/ScanScope), so reconcile CANNOT import
+    rebuild. To share the US-004 grouping logic, the shared primitive (OrderChunks) lives in reconcile and
+    rebuild delegates UP to it — invert the dependency rather than duplicating.
+  - RESTORE CLOBBER-SAFETY is the load-bearing invariant: only rebuild when the version row is genuinely
+    absent (GetObject → ErrObjectNotFound/ErrBucketNotFound). An overwritten version still has a valid
+    manifest pointing at a different OID — restoring it from the orphan would corrupt live data. classify
+    threads `objectAbsent`; restoreVersion re-probes before write.
+  - reconcile worker needed a data.Backend (Config.Data) for restore — it must READ chunk bytes to recompute
+    the rebuilt ETag. report/gc never touch it.
+  - Adding a ReconcileJob counter = additive Cassandra column (CREATE + alterStatements ALTER + INSERT
+    placeholder/arg count + UPDATE + scanReconcileRow projection order, all in lockstep). TiKV (json blob)
+    + memory (struct copy) are free.
+  - Backend-capability dispatch pattern: define optional interface in `data` (like ChunkStater), implement on
+    the concrete backend, type-assert in the worker wiring (chunkScanner/chunkProber). memory backend NOT
+    implementing ChunkLister keeps it on RADOSScanner.
+  - IsLatest discriminator tests MUST pick version_id ordering that DISAGREES with mtime (newer mtime → smaller
+    version_id), else a regression to version_id-sort passes silently. Mutation-test the guard.
+---

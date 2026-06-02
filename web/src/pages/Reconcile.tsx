@@ -105,6 +105,10 @@ export function ReconcilePage() {
         ? [
             { value: 'report', label: 'report — count only (safe default)' },
             { value: 'gc', label: 'gc — enqueue orphan chunks for deletion' },
+            {
+              value: 'restore',
+              label: 'restore — rebuild manifest from back-reference',
+            },
           ]
         : [
             { value: 'report', label: 'report — count only (safe default)' },
@@ -385,6 +389,7 @@ function ReconcileStatus({
             <Counter label="Chunks scanned" value={job.scanned} />
             <Counter label="Orphans found" value={job.orphans_found} />
             <Counter label="GC'd" value={job.orphans_gc} />
+            <Counter label="Restored" value={job.orphans_restore} />
             <Counter label="Reported" value={job.orphans_report} />
             <Counter label="No back-ref" value={job.absent_backref} />
             <Counter label="Errors" value={job.errors} tone="error" />

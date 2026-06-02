@@ -223,12 +223,13 @@ var (
 
 	// ReconcileOrphansFoundTotal counts orphan chunks (chunk present, no
 	// manifest references it) broken down by the resolution applied:
-	// resolution=report (counted, never deleted — the default) or
-	// resolution=gc (enqueued for deletion).
+	// resolution=report (counted, never deleted — the default), gc (enqueued
+	// for deletion), or restore (manifest row rebuilt from the back-reference,
+	// US-002b).
 	ReconcileOrphansFoundTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_reconcile_orphans_found_total",
-			Help: "Orphan chunks found by the reconcile worker, per resolution (report|gc).",
+			Help: "Orphan chunks found by the reconcile worker, per resolution (report|gc|restore).",
 		},
 		[]string{"resolution"},
 	)

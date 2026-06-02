@@ -31,21 +31,32 @@ func chunkProber(d data.Backend) reconcile.ChunkProber {
 	return nil
 }
 
+// chunkScanner picks the orphan-pass scanner for the live backend. The
+// S3-passthrough backend enumerates natively via ListObjects (data.ChunkLister
+// -> reconcile.S3Scanner, US-002b); every other backend uses the US-000 pool
+// walk (reconcile.RADOSScanner), which returns data.ErrRADOSNotCompiled on a
+// go-ceph-free build so a queued job records that and stops.
+func chunkScanner(d data.Backend, ratePerSec int) reconcile.ChunkScanner {
+	if l, ok := d.(data.ChunkLister); ok {
+		return &reconcile.S3Scanner{Lister: l}
+	}
+	return &reconcile.RADOSScanner{Backend: d, RatePerSec: ratePerSec}
+}
+
 func buildReconcile(deps Dependencies) (Runner, error) {
 	cfg := workerCfg(deps)
 	rcCfg := cfg.Workers.Reconcile
 	interval := orDuration(rcCfg.Interval, 30*time.Second)
 	w, err := reconcile.New(reconcile.Config{
 		Meta: deps.Meta,
-		// RADOS pool walk via the US-000 primitive (rados.EnumeratePool).
-		// On a go-ceph-free build the backend is the rados.New stub, so a
-		// queued job records data.ErrRADOSNotCompiled and stops — never a
-		// nil-pointer. The S3-passthrough native-ListObjects scanner is the
-		// trailing US-002b split.
-		Scanner: &reconcile.RADOSScanner{
-			Backend:    deps.Data,
-			RatePerSec: rados.ScanRateFromEnv(),
-		},
+		// Orphan-pass scanner: native ListObjects for the S3-passthrough backend
+		// (US-002b), else the US-000 RADOS pool walk. On a go-ceph-free build the
+		// RADOS leg records data.ErrRADOSNotCompiled and stops — never a
+		// nil-pointer.
+		Scanner: chunkScanner(deps.Data, rados.ScanRateFromEnv()),
+		// Data backs the restore policy (US-002b): it reads chunk bytes to
+		// recompute a rebuilt manifest's single-part ETag.
+		Data: deps.Data,
 		// Prober drives the US-003 dangling-manifest pass (meta->data). The
 		// memory backend implements data.ChunkStater directly; a default-tag
 		// RADOS build does not (the per-OID stat is the US-003b split), so a

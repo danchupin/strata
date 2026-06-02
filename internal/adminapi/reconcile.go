@@ -33,10 +33,11 @@ type ReconcileJSON struct {
 	State         string `json:"state"`
 	Cursor        string `json:"cursor,omitempty"`
 	Scanned       int64  `json:"scanned"`
-	OrphansFound  int64  `json:"orphans_found"`
-	OrphansGC     int64  `json:"orphans_gc"`
-	OrphansReport int64  `json:"orphans_report"`
-	AbsentBackref int64  `json:"absent_backref"`
+	OrphansFound   int64 `json:"orphans_found"`
+	OrphansGC      int64 `json:"orphans_gc"`
+	OrphansReport  int64 `json:"orphans_report"`
+	OrphansRestore int64 `json:"orphans_restore"`
+	AbsentBackref  int64 `json:"absent_backref"`
 	// Dangling-pass (US-003) counters.
 	ManifestsScanned   int64  `json:"manifests_scanned"`
 	Healthy            int64  `json:"healthy"`
@@ -52,7 +53,8 @@ type ReconcileJSON struct {
 // reconcilePostRequest is the JSON body accepted by POST /admin/v1/reconcile.
 // Two passes, discriminated by Bucket:
 //   - ORPHAN (data->meta): Bucket empty. Cluster + Pool required; Namespace
-//     optional. Policy is report (default) or gc.
+//     optional. Policy is report (default), gc, or restore (US-002b — rebuild
+//     the manifest row from the back-reference).
 //   - DANGLING (meta->data): Bucket set (the bucket NAME, resolved to its UUID
 //     here). Cluster/Pool ignored. Policy is report (default) or quarantine.
 type reconcilePostRequest struct {
@@ -78,6 +80,7 @@ func reconcileJSON(job *meta.ReconcileJob) ReconcileJSON {
 		OrphansFound:       job.OrphansFound,
 		OrphansGC:          job.OrphansGC,
 		OrphansReport:      job.OrphansReport,
+		OrphansRestore:     job.OrphansRestore,
 		AbsentBackref:      job.AbsentBackref,
 		ManifestsScanned:   job.ManifestsScanned,
 		Healthy:            job.Healthy,
