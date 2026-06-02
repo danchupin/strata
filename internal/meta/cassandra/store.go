@@ -1143,6 +1143,14 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 	res := &meta.ListResult{}
 	seenPrefix := make(map[string]struct{})
 	var lastKey string
+	// lastEmitted is the last key actually placed in res.Objects. openShardCursor
+	// resumes with `key > marker` (EXCLUSIVE), so on an object-path truncation
+	// NextMarker MUST point at the last EMITTED key — not the look-ahead key that
+	// tripped the limit, which `> marker` would then skip, dropping one object per
+	// page boundary (TestCassandraListBoundedFanOut "listed 498 keys, want 500";
+	// surfaced once US-010 put the Cassandra gate on CI). The look-ahead check is
+	// kept so an exact-multiple page still reports Truncated=false.
+	var lastEmitted string
 
 	for h.Len() > 0 {
 		top := heap.Pop(h).(*shardCursor)
@@ -1186,17 +1194,19 @@ func (s *Store) ListObjects(ctx context.Context, bucketID uuid.UUID, opts meta.L
 					}
 					seenPrefix[pfx] = struct{}{}
 					res.CommonPrefixes = append(res.CommonPrefixes, pfx)
+					lastEmitted = pfx
 				}
 				continue
 			}
 		}
 		if len(res.Objects)+len(res.CommonPrefixes) >= limit {
 			res.Truncated = true
-			res.NextMarker = obj.Key
+			res.NextMarker = lastEmitted
 			drainHeap(h)
 			return res, nil
 		}
 		res.Objects = append(res.Objects, obj)
+		lastEmitted = obj.Key
 	}
 	return res, nil
 }
