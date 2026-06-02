@@ -1,0 +1,410 @@
+# Ralph Progress Log
+Started: Sat May 31 2026
+Cycle: ralph/architecture-hardening
+---
+
+## Codebase Patterns
+- CI on Linux is the source of truth (FR-4). Local macOS/lima box: Xcode license NOT accepted -> cgo runtime build-fails for cmd/strata, cmd/strata/admin, internal/meta/tikv, internal/metrics, internal/serverapp (darwin gosigar sysctl under CGO0 too). `go vet ./...` / `make build` hit the same block locally - verify on CI. Many failure modes (Paxos starvation, race timing, SSE-KMS, drain) do not reproduce locally.
+- meta.Store contract: adding a method means updating BOTH internal/meta/memory AND internal/meta/cassandra AND internal/meta/tikv in lockstep, plus a caseX in internal/meta/storetest/contract.go (runs on memory + TiKV; Cassandra under -tags integration).
+- Cassandra LWT-on-LWT rule: any UPDATE on a row that may be read at quorum after a prior LWT insert MUST itself be LWT (IF EXISTS) or Paxos state goes stale (SetBucketVersioning learned this). Applies to CompleteReshard's shard_count flip (US-003).
+- Per-bucket shard resolution bug (this cycle's headline): cassandra/store.go has 9 shardOf(key, s.defaultShard) sites + 3 shardCount:=s.defaultShard list/scan sites that IGNORE bucket.ShardCount. resolveVersionID:2408 is the critical one (resolves ?versionId). US-001 fixes all of them; grep for s.defaultShard on object-addressing paths to verify none remain.
+- reshard is NOT a registered worker (absent from cmd/strata/workers/; CLAUDE.md: admin-driven one-shot). Only sync HTTP endpoint internal/s3api/admin.go:343 + strata admin bucket reshard CLI + reshard.Worker.RunOnce exist. There is no --workers=reshard path. US-005 decides async drive (register worker [recommended] or server-managed goroutine).
+- IsValidShardCount (internal/meta/store.go:1429): power-of-two only (n>0 && n&(n-1)==0). Reshard is doubling-only; each old shard s maps to {s, s+active} under 2*active.
+- s3api handler test harness: newHarness(t) + h.doString(method, path, body, headers...) + h.mustStatus(resp, code) in internal/s3api/testutil_test.go. Gates: requireObjectAccess (access.go:104) runs policy gate THEN ACL gate - US-008 flips that intersection to a union (explicit Deny still wins).
+- ChunkRef: internal/data/manifest.go:102 (Go struct) + internal/data/manifest.proto:54 (proto, fields 1-5 used, field 6 free for the US-009 CRC32C). Manifest decode sniffs first byte ({ = JSON, else proto); new proto fields with omitempty are schema-additive, legacy rows decode zero-valued.
+- Resolved cycle decisions (do not re-litigate): CRC32C not sha256; CRC verify on-by-default (STRATA_CHUNK_CRC_VERIFY); TiKV/memory reshard = immediate-complete no-op (API success, UI disabled); target-only writes + union-read + cleanup-before-flip; reshard console UI in-cycle; Cassandra contract via dedicated nightly CI job this cycle.
+- US-002 transitional model (Cassandra): while shard_count_target!=0, writes→target layout (fnv%target), reads union source(fnv%active)+target target-first (target wins (key,version_id) collision). Helpers: shardLayout/writeShardForKey/readShardsForKey/objectFanCount/latestAtShard/objLater. resolveVersionID is the single point-mutate funnel (probe both shards) — teach IT, not each caller. LIST uses objectFanCount=max(active,target); overwrite/delete clear BOTH shards.
+- DELETE-MARKER CROSS-SHARD GOTCHA: shardCursor.advance() must SURFACE a delete-marker head (real VersionID+Mtime), NOT swallow it — else during a reshard the source shard's older live row resurrects a key deleted in the target shard. ListObjects merge loop suppresses marker heads (`if obj.IsDeleteMarker { continue }` after setting lastKey). Memory backend can't catch this (shard-agnostic) — needs a Cassandra integration test.
+- CompleteReshard is a PURE FLIP with no migration. US-003 added the mover: Cassandra implements optional meta.ReshardMigrator (MigrateReshardKey, type-asserted in internal/reshard/runJob — same optional-interface pattern as meta.RangeScanStore). Memory/TiKV don't implement it → worker is an immediate-complete no-op there. Worker walks union ListObjectVersions per key, copies-THEN-deletes source inline (cleanup-before-flip), CompleteReshard only after the walk drains. Copy-first is deliberate (delete-first = key-in-neither-partition gap). insertObjectRowAtShard INSERT cols MUST track PutObject; objectSelectCols const tracks scanObjectQuery Scan order — drift silently corrupts reads.
+- ADDING A WORKER = 5 lockstep spots (US-005): (1) Register{} init() in cmd/strata/workers/<name>.go, (2) "<name>" in internal/metrics/metrics.go registeredWorkerNames, (3) WorkersConfig.<Name> field + defaults() + clampWorkers() in internal/config/config.go, (4) STRATA_<NAME>_* rows in envKeyMap, (5) [workers.<name>] in deploy/strata.toml.example + a row in docs/site/content/reference/env-vars.md. Miss (4)/(5) and TestEnvTOMLParity (config pkg) goes red, not the build. Optionally add a knownWorkers entry in cmd/strata/server.go so `strata server --help` lists it. Runner wraps each RunOnce in workers.StartIteration/EndIteration + metrics.ObserveWorkerTick("<name>",...) (see manifestRewriterRunner / reshardRunner).
+- LOCAL BUILD MATRIX (US-005): darwin cgo blocked by Xcode license AND gosigar needs cgo on darwin → packages pulling gosigar (cmd/strata/**, internal/metrics, internal/serverapp, internal/meta/tikv) can't build locally either way. Pure-Go packages (internal/config, internal/reshard) + internal/s3api (does NOT pull gosigar) DO build: `CGO_ENABLED=0 go vet ./internal/s3api/...` compiles s3api tests. Everything else: CI Linux is source of truth.
+- ADMIN AUDIT TEST PATTERN (US-005): /admin/* (handleAdmin) is gated on Owner==IAMRootPrincipal ("iam-root"); the base s3api newHarness does NOT wrap AuditMiddleware. To assert an admin write stamped its SetAuditOverride row, wire s3api.NewAuditMiddleware around a handler that injects auth.WithAuth(IAMRootPrincipal), then read store.ListAudit (see TestAdmin_BucketReshard_TriggerAudited). Resource convention for admin bucket writes is "bucket:<name>".
+- ENV KNOB = 4 lockstep spots OR exempt (US-012): ANY new STRATA_* literal in cmd/+internal/ (incl. a `const Env = "STRATA_X"` assignment) is caught by TestEnvTOMLParity (internal/config). Wire it through (1) Config koanf field, (2) envMap row → that koanf path, (3) deploy/strata.toml.example (commented `# key = val` line under the right [section] OK), (4) docs/site/content/reference/env-vars.md row with the koanf key in the last column — OR add it to internal/config/exempt_env_vars.go. Miss one → parity test RED, not the build. Even directly-os.Getenv'd knobs (GCDualWrite/SlowMS/ListConcurrency) follow this. config.go is NOT gofmt-clean on main (wider hand-alignment) — match neighbor columns by hand, never `gofmt -w` it.
+---
+
+## 2026-05-31 - US-001 Cassandra hot path resolves per-bucket shard count
+- Added short-TTL per-bucket shard-count cache to cassandra.Store: shardCacheEntry{active,target,expiry}, shardCache map guarded by shardCacheMu, const shardCacheTTL=10s. Init in Open.
+- New resolvers in store.go: bucketShardCounts(ctx,bucketID)->(active,target,err) (cache hit/miss->bucketForShards->cache); shardForKey(ctx,bucketID,key)->(shard,err) for point/mutate sites; bucketForShards (fast path bucketNames cache -> GetBucket(name) single-partition read; cold -> getBucketByID full scan); invalidateShardCache.
+- Patched ALL object-addressing sites off s.defaultShard: PutObject, GetObject, DeleteObject, SetObjectReplicationStatus, resolveVersionID, UpdateObjectSSEWrap, GetObjectManifestRaw, UpdateObjectManifestRaw (9 shardOf sites -> shardForKey); ListObjects, ListObjectVersions, AllObjectVersions (loop), SampleBucketShardStats(<=0 fallback), DeleteBucket->bucketIsEmpty (legacy<=0 guard) resolve active count.
+- reshard.go: StartReshard + CompleteReshard call invalidateShardCache(bucketID) synchronously after the shard_count/target flips.
+- Tests: generic storetest case caseNonDefaultShardRoundTrip (reshard to non-default, full PUT/GET/LIST/DELETE round-trip; trivial on shard-agnostic memory/tikv). Discriminating red/green proof in store_integration_test.go::TestCassandraPerBucketShardResolution (two stores same keyspace, writer default=128 and =16, reader default=64; reader must resolve stored count else 404). Asserts >=1 key partition differs so the test can't pass vacuously.
+- ROADMAP.md: added P1 "Cassandra hot path ignores per-bucket shard_count" entry, marked partially-fixed by US-001 (steady-state); transitional (US-002) + worker (US-003) still open in-cycle.
+- Files: internal/meta/cassandra/store.go, internal/meta/cassandra/reshard.go, internal/meta/cassandra/store_integration_test.go, internal/meta/storetest/contract.go, ROADMAP.md.
+- **Learnings for future iterations:**
+  - buckets table is partitioned by NAME, not id. There is NO buckets-by-id query path. Resolving a bucket by uuid means either the bucketNames id->name cache (warm in practice — gateway looks up bucket by name before every object op) + GetBucket(name), or getBucketByID which does a FULL ListBuckets scan. The TTL cache is what keeps this off the hot path.
+  - A single in-process store CANNOT produce a discriminating red/green test for the per-bucket-vs-global shard bug: a buggy store uses s.defaultShard consistently for BOTH write and read, so same-process PUT->GET round-trips pass even when buggy. The bug only manifests when WRITER and READER disagree on the count. The integration test opens TWO stores over the same keyspace with different DefaultShardCount to force that disagreement. Remember this shape for US-003's post-reshard point-GET proof too.
+  - CompleteReshard flips bucket.ShardCount on ALL backends (memory/tikv/cassandra) without needing the worker to have run or job.Done=true — that's how caseOnlineReshard already drives a count change. Use Start+Complete to get a non-default ShardCount in a test (note: reshard only doubles UP; to get a count LOWER than the process default e.g. 16, the bucket must be CREATED by a store whose DefaultShardCount=16).
+  - Cross-replica cache convergence: invalidateShardCache is process-LOCAL. Other gateway replicas converge within shardCacheTTL (10s). Fine for US-001 steady-state; US-003 transitional model must not depend on cross-replica synchronous invalidation.
+  - gopls modernize hints (rangeint, waitgroup, interface{}->any) fire all over this file pre-existing; they are not lint failures here. Don't churn them.
+---
+
+## 2026-05-31 - US-002 Reshard transitional read/write model (meta contract)
+- Cassandra transitional model (memory/TiKV are shard-agnostic flat-map → no-op). New helpers in store.go: shardLayout(active,target shards), writeShardForKey(write shard + clear set), readShardsForKey(probe set, target-first), objectFanCount(max(active,target) for LIST), latestAtShard(per-shard null-sentinel reconciliation), objLater(cross-shard newest-wins, target breaks tie).
+- Writes land in TARGET layout while shard_count_target!=0; PutObject overwrite (unversioned + suspended-null) + DeleteObject clear BOTH source+target shards so no stale source row is double-emitted.
+- Point reads (GetObject, resolveVersionID) probe both shards target-first → target wins (key,version_id) collision. resolveVersionID is the single funnel, so every UPDATE/DELETE-by-version path (SetObjectStorage/Tags/retention/legal-hold, SetObjectReplicationStatus, UpdateObjectSSEWrap, Get/UpdateObjectManifestRaw) inherits the fix.
+- LIST: ListObjects/ListObjectVersions/AllObjectVersions fan out over objectFanCount; cursorHeap.Less gained version-time tiebreak so target (newer) wins per key; ListObjectVersions+AllObjectVersions dedup exact (key,version_id) for mid-migration copies. Removed now-unused shardForKey (US-001 helper, superseded).
+- Proof: storetest caseReshardTransitionalKeySet (cross-backend in-flight key-set stability, no-op on memory/TiKV). Cassandra integration TestCassandraReshardTransitional (during-job writes land in target layout + SURVIVE post-flip rotation — RED pre-US-002) + TestCassandraReshardDeleteMarkerNoResurrect (cross-shard delete marker must not resurrect a deleted key).
+- Files: internal/meta/cassandra/store.go, internal/meta/storetest/contract.go, internal/meta/cassandra/store_integration_test.go, ROADMAP.md.
+- **Learnings for future iterations:**
+  - CRITICAL DELETE-MARKER GOTCHA (found by strata-correctness-reviewer): shardCursor.advance() used to SWALLOW a delete-marker head (set placeholder, continue) — correct single-shard (clustering-DESC heads with marker, key hidden), but cross-shard during a reshard the source shard's older LIVE row gets listed while the target's marker is invisible → RESURRECTION. Fix: advance() now RETURNS the marker head with real VersionID+Mtime; the ListObjects merge loop suppresses delete-marker heads (`if obj.IsDeleteMarker { continue }` after setting lastKey). Steady-state behavior preserved.
+  - NO migration worker in US-002. CompleteReshard is a pure flip (US-001 era). Calling it before US-003's worker migrates source rows STRANDS un-rewritten diverging keys on Cassandra (active rotates to target, source-layout rows now addressed by fnv%target ≠ their shard). So the storetest contract case asserts ONLY in-flight stability (target!=0), never post-premature-complete. US-003 must gate CompleteReshard behind cleanup-before-flip.
+  - Two-layout invariant (not strictly doubling): a reshard has exactly TWO layouts in flight (source fnv%active, target fnv%target), so the read/write/clear set is ≤2 partitions for ANY power-of-two target. The strict {s, s+activeCount} doubling mapping only matters for US-003's row mover, NOT the US-002 union read. StartReshard accepts any power-of-two target>source.
+  - resolveVersionID is the highest-leverage point-mutate funnel: teaching it the source/target probe fixed ~6 UPDATE-by-version paths at once. Steady state (single shard) keeps the no-probe round-trip for explicit versions (perf parity).
+  - Memory backend can't validate the Cassandra cursor fix (shard-agnostic). The cross-shard delete-marker discriminator MUST be a Cassandra integration test.
+---
+
+## 2026-05-31 - US-003 Reshard worker actually rewrites rows + cleanup
+- Cassandra now implements the optional meta.ReshardMigrator interface (new in internal/meta/store.go). MigrateReshardKey(bucketID,key) relocates EVERY version row of a key from its source shard (fnv%active) to its target shard (fnv%target) via INSERT … IF NOT EXISTS, then DELETEs the source orphan. Idempotent + crash-safe: IF-NOT-EXISTS never clobbers a newer concurrent target write; unconditional source DELETE is a no-op once gone; re-run after a partial crash converges. Returns rows actually moved (applied==true only).
+- New cassandra helpers (internal/meta/cassandra/reshard.go): scanAllVersionsAtShard (iter over all versions of a key in one shard, full column projection, closes iter on every path) + insertObjectRowAtShard (full-column INSERT mirroring PutObject EXACTLY, optional IF NOT EXISTS via MapScanCAS, NO bucket_stats bump — a move conserves totals) + objectSelectCols const. Refactored scanObjectLimit1/scanObjectByVersion onto the const (no semantic change; reviewer verified byte-identical column order).
+- internal/reshard/reshard.go runJob rewritten: walks the in-flight union ListObjectVersions key-by-key, drives MigrateReshardKey per DISTINCT key (dedup via lastMigrated since a key's versions are adjacent in key-ASC order) under a LastKey watermark, with a forward-progress guard for the inclusive (key>=marker) over-large-key edge. RunOnce still calls CompleteReshard AFTER runJob drains every key → cleanup-before-flip guaranteed (flip only on nil-error walk completion). Stats.ObjectsCopied now = real rows moved (0 on shard-agnostic backends).
+- Files: internal/meta/store.go, internal/meta/cassandra/reshard.go, internal/meta/cassandra/store.go, internal/reshard/reshard.go, internal/reshard/reshard_test.go, internal/meta/cassandra/store_integration_test.go, CLAUDE.md, ROADMAP.md, scripts/ralph/prd.json.
+- Proof: integration TestCassandraReshardWorkerMovesRows (64→128, 300 unversioned + one 3-version diverging key; asserts ObjectsCopied==diverging+3, post-flip every key point-GETs, LIST emits each once, all 3 versions reachable by id + latest ordering) — RED against the row-walking skeleton (post-flip the diverging half 404s from empty target partitions), GREEN after. Worker unit tests rewritten onto a recordingStore meta.ReshardMigrator fake so the dedup-per-key + watermark-resume assertions stay genuine on the shard-agnostic memory backend.
+- strata-correctness-reviewer: no blocking issues; all 5 requested verifications pass (column-list parity, INSERT/arg parity, MapScanCAS not ScanCAS, no iter leak, cleanup-before-flip guaranteed).
+- **Learnings for future iterations:**
+  - The reshard worker is GENERIC over meta.Store; backend-specific row movement is an OPTIONAL interface (meta.ReshardMigrator), type-asserted in runJob — same pattern as meta.RangeScanStore. Memory/TiKV deliberately DON'T implement it → the worker is an immediate-complete no-op there (this already gives US-004 the memory/TiKV no-op semantics for the worker path; US-004 still reworks TiKV's StartReshard job-queueing).
+  - To copy a Cassandra objects row faithfully across partitions, scan→Object→re-INSERT is the GET→PUT round-trip the read/write paths already preserve. insertObjectRowAtShard MUST keep its INSERT column list in lockstep with PutObject's; objectSelectCols MUST match scanObjectQuery's Scan order. A column-order drift silently corrupts reads — there is now a shared const for the SELECT half but the INSERT half is still duplicated (PutObject not refactored, to avoid hot-path risk).
+  - ListObjectVersions marker is INCLUSIVE (openVersionCursor: key >= ?). A worker loop that resumes with Marker=lastKey re-lists that key; dedup per-key + a forward-progress guard (cursor==startMarker → cursor+="\x00") are required so a key with > pageLimit versions can't pin the marker forever. MigrateReshardKey moves ALL of a key's versions on first sight, so stepping past the key is safe.
+  - cleanup-before-flip is the load-bearing ordering: MigrateReshardKey copies-THEN-deletes the source inline, so once the walk drains, the source layout holds no diverging row; CompleteReshard (LWT IF EXISTS) runs only after. Copy-first (not delete-first) is deliberate — delete-first opens a window where the key is in NEITHER partition (breaks US-002 stable-key-set). The trade is a named narrow race: a concurrent specific-version DELETE in the copy window can resurrect that version (ROADMAP P2, Known latent bugs).
+  - A single in-process store still can't discriminate the post-reshard-404 bug for point-GET in a same-process test (writer+reader agree). The integration test seeds at DefaultShardCount=64, StartReshard(128), runs the REAL worker.RunOnce, then asserts post-flip point-GET — the skeleton (no row move) leaves the diverging half in shards [0,64) while fnv%128 addresses [64,128) → 404. That's the discriminator.
+---
+
+## 2026-05-31 - US-004
+- Reshard semantics on TiKV + memory: immediate-complete no-op.
+- internal/reshard/reshard.go `runJob`: short-circuit when backend does NOT
+  implement meta.ReshardMigrator (memory flat map, TiKV range scan) — return
+  (0,nil) WITHOUT the ListObjectVersions walk or per-batch UpdateReshardJob
+  watermark writes. RunOnce then calls CompleteReshard → "completes at once,
+  zero rows moved". Package + runJob doc comments updated.
+- DESIGN CALL (important): did NOT gut TiKV/memory StartReshard despite AC1's
+  "old job-queueing path removed" wording. Decision #4 itself requires
+  "StartReshard returns a job that RunOnce completes", and the SHARED
+  storetest caseOnlineReshard (runs on memory+tikv+cassandra) asserts the full
+  state machine: job queued, TargetShardCount stamped, second start =>
+  ErrReshardInProgress, CompleteReshard flips+clears+deletes. Removing the
+  queue would break that green contract on the per-PR CI gate. The "no-op" is
+  a WORKER property (zero moved, no walk), not a StartReshard gutting. Honors
+  intent without weakening a shipped contract.
+- Tests:
+  - internal/reshard/reshard_test.go: new TestReshardNoOpOnShardAgnosticBackend
+    + countingStore (counts ListObjectVersions/UpdateReshardJob). Asserts
+    JobsCompleted=1, ObjectsCopied=0, listVersionsCalls=0, updateJobCalls=0,
+    ShardCount flips 64->128, full key set readable before/during/after.
+    RED/GREEN PROVEN: reverting the runJob short-circuit => 6 ListObjectVersions
+    calls (FAIL); with it => 0 (PASS).
+  - internal/meta/storetest/contract.go caseOnlineReshard: strengthened the
+    during/after count-only checks into full key-SET equality (assertKeySet)
+    + added an explicit "before reshard" snapshot. Additive, reuses harness.
+- docs/site/content/architecture/sharding.md: reshard does physical work only
+  on Cassandra fan-out; TiKV/memory shard-agnostic => no-op success, console
+  disabled (US-006).
+- AC3 (IsValidShardCount gate) already satisfied on both backends; covered by
+  existing TestReshardRejectsInvalidTarget (memory) + TestReshardStartInvalidTarget (tikv).
+- **Learnings for future iterations:**
+  - The reshard "no-op" lives in internal/reshard/reshard.go runJob (the only
+    place that can "complete at once"), NOT in StartReshard. StartReshard MUST
+    keep queueing + stamping TargetShardCount — caseOnlineReshard locks that in
+    on every backend.
+  - meta.ReshardMigrator is implemented ONLY by Cassandra. memory + TiKV rely on
+    the nil-migrator path. A `w.cfg.Meta.(meta.ReshardMigrator)` type-assert is
+    the backend discriminator.
+  - storetest.Run runs on memory, tikv, AND cassandra (cassandra+scylla
+    integration). A contract case that calls CompleteReshard WITHOUT migration
+    strands rows on Cassandra (source layout) — fine while US-010/US-012 keep
+    Cassandra off the per-PR gate, but don't add new after-flip-no-migration
+    assertions expecting Cassandra green.
+  - Local macOS: `make vet` / `go build ./...` fail on cgo (Xcode license +
+    gosigar under CGO_ENABLED=0). Validate pure-Go packages with
+    `CGO_ENABLED=0 go test ./internal/<pkg>/...`; CI Linux is source of truth.
+---
+
+## 2026-05-31 - US-005 Online-reshard admin endpoint (async) + concurrent-write smoke
+- SPLIT adminBucketReshard (internal/s3api/admin.go) into trigger + progress:
+  POST /admin/bucket/reshard?bucket&target -> StartReshard + 202 {state:"queued"}
+  (NO inline worker.RunOnce — a large bucket's migration must not block the HTTP
+  request) + SetAuditOverride("admin:BucketReshard","bucket:<name>",...). New
+  GET /admin/bucket/reshard?bucket -> GetReshardJob -> {state: queued|running|idle}
+  on every backend (idle reports b.ShardCount when no job in flight). Reworked
+  the shared adminBucketReshardResponse (dropped JobsScanned/Completed/Copied/
+  DurationMs; added State/LastKey/ShardCount). Removed the internal/reshard import
+  from admin.go.
+- ASYNC DRIVE = registered leader-elected worker (option a, recommended).
+  cmd/strata/workers/reshard.go: Register{Name:"reshard"} (SkipLease=false ->
+  supervisor `reshard-leader` lease). reshardRunner.Run loops worker.RunOnce on
+  STRATA_RESHARD_INTERVAL, wrapping each pass in StartIteration/EndIteration +
+  metrics.ObserveWorkerTick("reshard",...). Added "reshard" to
+  internal/metrics/metrics.go registeredWorkerNames (+ updated the "intentionally
+  absent" comment there and the two CLAUDE.md notes + the architecture diagram).
+- CONFIG: WorkersConfig.Reshard{Interval,BatchLimit}; defaults 30s/500; clamp
+  [1s,1h]/[1,100000]; env STRATA_RESHARD_INTERVAL / STRATA_RESHARD_BATCH_LIMIT in
+  envKeyMap; deploy/strata.toml.example [workers.reshard]; docs env-vars.md row;
+  knownWorkers entry in cmd/strata/server.go so `strata server --help` lists it.
+- CLI (cmd/strata/admin): BucketReshard now async (prints state=queued); new
+  BucketReshardStatus (GET); `bucket reshard --wait [--poll-interval]` polls the
+  progress read until state=idle.
+- SMOKE: scripts/smoke-reshard.sh + `make smoke-reshard`. Drives 64->128 against
+  the Cassandra lab (:9998) with concurrent PUT/GET/DELETE; asserts no client 5xx/
+  spurious-404, identical seed key set before/after, post-flip point-GET; Scenario
+  C does `docker restart strata-cassandra` mid-job to prove crash-resume. Skips
+  (77) when lab down unless REQUIRE_LAB=1. Requires the reshard worker enabled:
+  STRATA_WORKERS=...,reshard. Operator runbook in
+  docs/site/content/architecture/sharding.md (## Online reshard).
+- TESTS:
+  - internal/reshard/reshard_test.go: TestReshardCrashResumesFromWatermark
+    (crashingStore migrator fails on k-25 first pass -> RunOnce errors, job stays
+    queued, ShardCount NOT flipped, watermark pinned at k-18 [inclusive-marker
+    batching: k-00..k-09,k-09..k-18,k-18..]; second RunOnce resumes + converges).
+    RED/GREEN: a buggy worker that flips on a crashed job fails the "ShardCount
+    must stay 64" assert.
+  - internal/s3api/admin_test.go: TriggerIsAsync (202+queued, count NOT flipped
+    inline, progress queued->idle after a manual worker pass), InProgressConflict
+    (409), StatusIdleWhenNoJob, StatusRunning (LastKey watermark), TriggerAudited
+    (admin:BucketReshard row via a self-wired AuditMiddleware+root injector).
+    Rewrote the old synchronous TestAdmin_BucketReshard_RoundTrip (it asserted the
+    inline flip — deliberately removed behavior).
+  - cmd/strata/workers/reshard_test.go: registered (SkipLease=false), env reads,
+    defaults, requires-meta, and a runner end-to-end (queued job drained on first
+    tick, clean ctx-cancel stop).
+  - cmd/strata/admin/run_test.go: TestApp_BucketReshard rewritten for async
+    (state=queued output, count stays at source, job queued).
+- Files: internal/s3api/admin.go, internal/s3api/admin_test.go,
+  cmd/strata/workers/reshard.go (+_test), cmd/strata/admin/{client,run}.go (+run_test),
+  cmd/strata/server.go, internal/config/config.go, internal/metrics/metrics.go,
+  internal/reshard/reshard_test.go, deploy/strata.toml.example,
+  docs/site/content/reference/env-vars.md, docs/site/content/architecture/sharding.md,
+  scripts/smoke-reshard.sh, Makefile, CLAUDE.md, ROADMAP.md, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - LOCAL BUILD: cmd/strata/workers + cmd/strata/admin + internal/metrics pull
+    gosigar -> can't build on darwin with CGO off (gosigar darwin needs cgo) NOR
+    with cgo (Xcode license). internal/s3api does NOT pull gosigar, so
+    `CGO_ENABLED=0 go vet ./internal/s3api/...` DOES compile its tests — use it to
+    validate s3api handler+test changes locally. config + reshard are pure-Go too.
+    Everything else: CI Linux is the source of truth.
+  - ListObjectVersions Marker is INCLUSIVE (key >= marker): each reshard batch
+    re-lists the prior batch's last key, and the per-run `lastMigrated` dedup skips
+    it. So the persisted watermark after batch N is that batch's LAST key, and a
+    crash mid-batch N+1 rewinds to it (re-walked keys re-migrate idempotently). A
+    crash-resume test's expected watermark is the last CLEAN batch tail, not the
+    failing key minus one.
+  - The admin reshard endpoint is the OLD /admin/* (handleAdmin) surface, gated on
+    Owner==IAMRootPrincipal ("iam-root") via SigV4 (curl --aws-sigv4 / aws cli with
+    a root-owner static cred), NOT the /admin/v1 cookie-login adminapi surface. The
+    base s3api newHarness does NOT wrap AuditMiddleware — to assert an audit row,
+    wire NewAuditMiddleware around a principal-injecting handler yourself (see
+    TestAdmin_BucketReshard_TriggerAudited).
+  - Adding a worker now touches FIVE lockstep spots: Register init() +
+    registeredWorkerNames + WorkersConfig field+defaults+clamp + envKeyMap +
+    env_toml_parity (toml.example + env-vars.md doc). Missing any one fails
+    TestEnvTOMLParity, not the build.
+---
+
+## 2026-05-31 - US-006 Reshard progress in the web console
+- Console reshard UX mirroring drain-progress. NEW cookie-auth adminapi pair (the web console talks to /admin/v1/*, NOT the s3api /admin/* IAMRoot surface US-005 added): GET|POST /admin/v1/buckets/{bucket}/reshard in internal/adminapi/buckets_reshard.go. GET → BucketReshardJSON{supported,state(idle|queued|running),source,target,shard_count,last_key,started_at}; POST{target} → 202 queued + admin:BucketReshard audit override. `supported` = (s.MetaBackend=="cassandra") — only Cassandra implements meta.ReshardMigrator; TiKV/memory are immediate-complete no-ops. Routes registered in internal/adminapi/server.go after the placement triple.
+- Web: src/api/reshard.ts (fetchBucketReshard/startBucketReshard/nextPowerOfTwo + types) re-exported from src/api/client.ts; queryKeys.buckets.reshard in src/lib/query.ts. New src/components/BucketReshardPanel.tsx (typed-confirm dialog mirroring DeleteBucketDialog + a ReshardProgress sub-component) mounted at the TOP of the Distribution tab (BucketDistributionTab.tsx) — natural home, the skew banner there already says "consider resharding". Button disabled+tooltip "range-scan backend needs no resharding" when !supported; the wrapping span carries the title (disabled <button> swallows hover).
+- Tests: Go internal/adminapi/buckets_reshard_test.go (idle/supported-on-cassandra/queue+poll/invalid-target/not-found/in-progress-conflict/audited — audit test wraps s.routes() in s3api.NewAuditMiddleware then ListAudit by bucket ID, mirrors TestSettingsRotateAuditRow). Web unit src/components/__tests__/bucket-reshard-panel.test.mjs (re-impl pattern: nextPowerOfTwo + state→label + supported→enabled gating; added to package.json test:unit; 64/64 pass). Playwright e2e/reshard-progress.spec.ts (2 tests: trigger→in-progress→complete via page.route() state machine on supported backend; TiKV-disabled state — fully spoofed like drain-progress.spec.ts; `npx playwright test --list` parses both).
+- Verified: CGO_ENABLED=0 go test ./internal/adminapi/ green; go vet green; web npm run typecheck green; npm run test:unit 64/64.
+- **Learnings for future iterations:**
+  - TWO admin surfaces exist and they are NOT interchangeable. (1) internal/s3api handleAdmin serves /admin/* gated on Owner==IAMRootPrincipal ("iam-root") — used by the strata-admin CLI; US-005's reshard endpoint lives HERE (/admin/bucket/reshard). (2) internal/adminapi serves /admin/v1/* with cookie/session auth — this is what the React console (web/src/api/*) talks to. A console feature needs an adminapi /admin/v1 endpoint; you CANNOT point the web client at the s3api /admin/* route (different auth). US-006 had to add the /admin/v1 reshard pair even though US-005 already added the s3api one.
+  - adminapi bucket sub-routes: register `METHOD /admin/v1/buckets/{bucket}/<sub>` in internal/adminapi/server.go::routes(); read `r.PathValue("bucket")`; helpers writeJSON/writeJSONError (errorResponse{code,message}); audit via s3api.SetAuditOverride(ctx, "admin:<Verb>", "bucket:"+name, name, auth.FromContext(ctx).Owner) — resource convention "bucket:<name>". s.MetaBackend ("cassandra"/"tikv"/"memory") is on the adminapi Server for backend-capability gating.
+  - adminapi test harness: newTestServer() (MetaBackend "memory") + putAdmin(t,s,owner,method,path,body) injects auth.WithAuth and calls s.routes(). To flip backend capability in a test, mutate s.MetaBackend="cassandra" after newTestServer() (memory store still backs it — `supported` is a pure string check, doesn't need a real Cassandra). To assert an admin audit row landed, wrap s.routes() in s3api.NewAuditMiddleware(s.Meta, time.Hour, s.routes()) and read s.Meta.ListAudit(ctx, bucketID, n) — putAdmin's bare s.routes() does NOT persist audit.
+  - The web console e2e CANNOT run locally on this darwin box (webServer runs `go run ./cmd/strata server` → cgo → Xcode-license block). `npx playwright test --list` parses/validates specs without booting the gateway. Browser verify (AC5) + e2e execution are CI-only here. Fully-spoofed specs (page.route every bucket-scoped endpoint, goto /console/buckets/<name>?tab=<tab> directly after login) avoid gateway seeding — copy drain-progress.spec.ts. Glob `**/admin/v1/buckets/bkt` matches the detail fetch but NOT `/bkt/reshard` (extra segment) so the bare-detail and subpath routes don't collide.
+  - mjs unit-test convention: re-implement the pure helper LOCALLY in the .mjs (node --test can't import .ts/.tsx); the comment must name the production source it mirrors + state that drift is caught by the Playwright spec. Add the new file to package.json `test:unit` (space-separated node --test arg list) or it won't run in CI.
+  - DELIBERATE AC DEVIATION (recorded): AC2 says "% complete + ETA" but the US-005 progress endpoint exposes only state + LastKey (no moved/total row counter). Fabricating % from the lexicographic watermark would mislead (keys aren't uniform). Surfaced honest signals instead: state machine + watermark cursor + elapsed-since-started. A real %/ETA needs the reshard worker to persist moved/total counts on the job (follow-up; noted in ROADMAP).
+  - PRE-EXISTING gofmt drift in internal/adminapi/server.go (Config struct field alignment, lines ~209-230) is unrelated to this story and predates it — go vet (CI lint-build) doesn't gate gofmt, so left untouched to avoid churn outside scope.
+---
+
+## 2026-05-31 - US-007 Direct test matrix for DeleteObjects (closes R1)
+- Added internal/s3api/delete_objects_test.go — direct table-driven handler tests over newHarness. No source change (test-only, pins existing behavior).
+- TestDeleteObjects_Matrix (unversioned): verbose reports existing+missing keys as Deleted (idempotent, no Error rows); quiet suppresses Deleted; quiet still reports per-key errors; mixed success + per-key <Error> wire shape (empty <Key> -> MalformedXML error row). Asserts each Deleted key 404s after.
+- TestDeleteObjects_RequestRejected: 1001 keys / zero objects / not-well-formed body -> 400 MalformedXML top-level.
+- TestDeleteObjects_CapBoundary: exactly 1000 accepted (200, 1000 Deleted rows, 0 errors) — proves cap is strictly >1000.
+- TestDeleteObjects_Versioned: no-versionId delete -> DeleteMarker=true + DeleteMarkerVersionId; explicit ?versionId -> VersionId row + version 404s; deleting marker's own version -> DeleteMarker row + restores prior latest (v2).
+- Sanity: flipped CapBoundary 1000->999 expectation, observed RED, reverted.
+- ROADMAP R1 P2 entry close-flipped.
+- **Learnings for future iterations:**
+  - DeleteObjects is IDEMPOTENT: a missing key returns ErrObjectNotFound from meta.DeleteObject, the handler SKIPS the error append (delete_objects.go:112 `!errors.Is(derr, meta.ErrObjectNotFound)`) and emits a success <Deleted> row — there is NO NoSuchKey <Error> path. The only per-key <Error> rows are MalformedXML (empty key), AccessDenied (object lock), InternalError (other delete err). So "mixed success/NoSuchKey" in R1 == existing+missing both succeed, not an error row. Don't assert a NoSuchKey error row — it won't exist.
+  - The 1000-key cap is `len(req.Objects) == 0 || len(req.Objects) > 1000` -> ErrMalformedXML (delete_objects.go:61). So 1000 is accepted, 1001 rejected, 0 rejected. Same MalformedXML code as a parse failure.
+  - Quiet only suppresses the <Deleted> list (delete_objects.go:133 `if !req.Quiet`); <Error> rows always emit regardless of Quiet.
+  - Versioned response shaping (delete_objects.go:124-132): request-VersionId echoed into entry.VersionID first; then if versioned && o.IsDeleteMarker -> DeleteMarker=true + DeleteMarkerVersionId=wireVersionID(o) (and VersionId stays the request value, "" for an unversioned-style delete); else if explicit versionId -> entry.VersionID=wireVersionID(o) (actual removed version). Deleting a delete-marker BY its versionId also yields a DeleteMarker=true row.
+  - s3api package builds/tests locally under CGO_ENABLED=0 (does NOT pull gosigar): `CGO_ENABLED=0 go test ./internal/s3api/`. `make vet` (go vet ./...) still cgo-blocks locally — CI Linux is source of truth.
+---
+
+## 2026-05-31 - US-008
+- Object access flipped from policy-INTERSECT-ACL to AWS policy-UNION-ACL (closes R6).
+- internal/auth/policy/policy.go: added EvaluateExplicit(doc,...) -> (allow, deny, err) so a
+  neutral no-match is distinguishable from explicit Allow/Deny (plain Evaluate collapses no-match
+  into Deny, which cannot drive a union).
+- internal/s3api/access.go: rewrote requireObjectAccess. Precedence: explicit policy Deny -> 403;
+  explicit policy Allow -> grant regardless of ACL (anon grant suppressed by RestrictPublicBuckets);
+  access-point policy stays a required intersection gate on top; neutral policy -> requireACL fallback.
+  No longer delegates to requireAccess (that stays intersection for bucket-level ListBucket).
+- Fixture rework: policy_gate_test.go + auth_public_access_matrix_test.go now own buckets via a
+  DISTINCT X-Test-Principal so a GENUINE non-owner anon exercises the union. Added direct cases for
+  owner-full-control and explicit-Deny-wins-over-owner.
+- Red/green proof: reverted access.go to HEAD, ran new tests -> FAIL (anon-allowed-by-policy/private-ACL
+  = 403, matrix policy/no-pab = 403); restored union impl -> PASS. Matrix cell policy/no-pab flipped 403->200.
+- ROADMAP R6 close-flipped; inline R6 follow-up note updated.
+- CGO_ENABLED=0 go test ./internal/s3api ./internal/auth/... PASS; go vet PASS. (local cgo/Xcode
+  blocks the default-tag build; CI Linux is source of truth.)
+- strata-correctness-reviewer: no blocking issues on the security-sensitive widening.
+
+**Learnings for future iterations:**
+- HARNESS OWNER-MATCH MASK: no X-Test-Principal => anon identity Owner="anonymous"; a bucket PUT the same
+  way is owned by "anonymous", so requireACL owner-match (info.Owner==b.Owner) trivially passes and HIDES
+  the gate under test. Any auth-gate test that means to exercise a non-owner MUST own the bucket with a
+  distinct principal. This silently made the old TestPolicyGate_* pass under intersection.
+- policy.Evaluate returns only Allow|Deny (no-match == Deny). For any UNION-style gate use the new
+  EvaluateExplicit to separate neutral from explicit Deny.
+- requireObjectAccess no longer calls requireAccess; if you add object-action authz, edit requireObjectAccess
+  directly (it inlines bucket-policy + RestrictPublicBuckets + access-point + ACL fallback).
+- Local default-tag build/test dies on Xcode license (runtime/cgo) and CGO_ENABLED=0 dies on gosigar/darwin;
+  scope tests to the changed packages with CGO_ENABLED=0 and lean on CI Linux.
+---
+
+## 2026-06-02 - US-009
+- Per-chunk CRC32C on the read path, fail-loud (closes R9). Bulk of the field/proto/helper scaffolding was already in the working tree (crc.go, ChunkRef.Checksum, manifest.proto f6 crc32c, pb.go); finished the wiring + read-path verification + tests.
+- Files changed:
+  - internal/data/errors.go: NEW ErrChecksumMismatch sentinel (was referenced by crc.go but undefined — build was broken).
+  - internal/data/manifest_codec.go: map Checksum<->Crc32C both encode + decode directions.
+  - internal/data/memory/backend.go: stamp CRC in PutChunks; verify WHOLE chunk in memReader.seekToChunk before slicing; added deterministic CorruptChunkByOID test helper.
+  - internal/data/rados/parallel.go: stamp CRC centrally in PutChunksParallel coordinator (covers cephimpl free).
+  - internal/data/rados/prefetch.go: new fetchSegment — option (a) full-chunk verify on range boundaries (partial segment refetches the whole chunk, verifies, then slices).
+  - internal/config/config.go: ChunkCRCVerify bool (default true) + STRATA_CHUNK_CRC_VERIFY env map + parity docs (deploy/strata.toml.example, docs/.../env-vars.md).
+  - internal/serverapp/serverapp.go: data.SetChunkCRCVerify(cfg.ChunkCRCVerify) at startup.
+  - Tests: memory/corruption_test.go (mismatch/clean/range-boundary/opt-out/legacy-zero), rados/prefetch_test.go (mismatch/range-boundary/clean), rados/parallel_test.go (write-path stamp assertion), manifest_codec_test.go (checksum round-trip), config/misc_test.go (default+opt-out).
+  - ROADMAP.md R9 close-flipped.
+- Review (review-strata correctness tests): correctness CLEAN no-blocking. Tests reviewer caught 2 issues, BOTH FIXED:
+  - HIGH/flake: CorruptFirstChunk flips a RANDOM map entry (map iteration), so the range-boundary memory test only hit chunk0 ~half the time → flaky under CI -race. Fixed via deterministic CorruptChunkByOID(m.Chunks[0].OID).
+  - suggestion: no direct assertion on the RADOS coordinator stamp (deleting parallel.go:96 left all tests green). Added TestPutChunksParallelStampsCRC.
+- **Learnings for future iterations:**
+  - CorruptFirstChunk in memory backend is NON-DETERMINISTIC (b.chunks is a map). For any CRC/range test that must hit a SPECIFIC chunk, use CorruptChunkByOID(oid) — pass m.Chunks[i].OID. Full-read no-error tests can keep CorruptFirstChunk.
+  - Read-path CRC option (a): partial range-boundary chunks are refetched in FULL and verified before slicing (a windowed CRC would false-positive vs the stored full-chunk CRC). Interior chunks already full. Cost: a boundary range GET reads the whole 4 MiB boundary chunk.
+  - zero==absent is the legacy-skip sentinel: VerifyChunk and prefetch fetchSegment both no-op when ref.Checksum==0. Tests must clear checksums to simulate pre-US-009 rows.
+  - config default-true bool: set it in defaults() (struct provider loads it), koanf env override only fires on non-empty STRATA_* — string "false" parses to bool false fine (BatchOps precedent). Parity test (TestEnvTOMLParity) REQUIRES a matching line in deploy/strata.toml.example AND a row in docs/site/content/reference/env-vars.md for every new Config field.
+  - CRC stamping is CENTRAL in PutChunksParallel (rados coordinator) so cephimpl + any chunk-based backend inherits it; memory stamps in its own loop. S3 backend is whole-object pass-through (BackendRef, no plaintext chunks we own) — out of scope.
+  - Local macOS box: cgo/Xcode-license blocks building any package that transitively pulls tikv (gosigar) or net cgo (s3/serverapp). data/memory/rados/config build+test fine without cgo. CI Linux is source of truth.
+---
+
+## 2026-06-02 - US-012 Cassandra ListObjects fan-out rebuilt for production
+- Bounded fan-out: new internal/meta/cassandra/listfanout.go with runBoundedFanOut(ctx, shardCount, concurrency, fn) — semaphore-capped worker pool (acquire BEFORE spawn → peak live workers ≤ concurrency), errCh buffered to shardCount, ctx-cancel returns ctx.Err() after wg.Wait. Replaces the one-goroutine-per-shard-NO-semaphore loops in ListObjects (store.go:~1082) + ListObjectVersions (~1195). Store gained listConcurrency field; Options.ListConcurrency wired in Open (≤0 → ListConcurrencyFromEnv(), re-clamp to maxListConcurrency=256).
+- Knob: STRATA_CASSANDRA_LIST_CONCURRENCY → cassandra.list_concurrency (default DefaultListConcurrency=16, clamp [1,256]). Config-wired full chain: CassandraConfig.ListConcurrency + clampInt in validate + envMap + deploy/strata.toml.example + docs/site/content/reference/env-vars.md (TestEnvTOMLParity is a HARD gate — a STRATA_* literal anywhere in cmd/+internal/ MUST be in envMap+toml+docs or exempt).
+- Memory bound: per-cursor page capped at listPageSize=256 (was limit+1 for ListObjects, limit*2 for ListObjectVersions; limit≤1000). Decoupled from request limit — advance() auto-pages via gocql, truncation still decided by counting emitted rows (len(res.Objects/Versions) >= limit), NEVER page exhaustion. Resident = shardCount×256 heads + concurrent-fetch-burst listConcurrency×256, not shardCount×(limit+1).
+- Consistency: pinned gocql.LocalQuorum EXPLICITLY on openShardCursor (2 query variants) + openVersionCursor (2) + AllObjectVersions iter. Session default is already LocalQuorum (session.go:61) so this is defensive explicit-pinning — read-after-write coherence no longer rides on an operator not lowering the default.
+- Proof: pure-Go unit listfanout_test.go — TestRunBoundedFanOut_CapsConcurrency (128 shards, conc=8, 1ms hold → maxInFlight≤8 AND ≥2 non-vacuous; RED against old per-shard spawn where max≈128), _PropagatesError, _RespectsCancellation, _DegenerateConcurrency (clamp), TestListConcurrencyFromEnv (table). Integration store_integration_test.go::TestCassandraListBoundedFanOut (128-shard bucket via DefaultShardCount=128, ListConcurrency=4: spot read-after-write at LOCAL_QUORUM during seed + 16 concurrent listAll goroutines each assert complete stable strictly-ascending key set).
+- Files: internal/meta/cassandra/listfanout.go (new), internal/meta/cassandra/listfanout_test.go (new), internal/meta/cassandra/store.go, internal/meta/cassandra/store_integration_test.go, internal/config/config.go, internal/serverapp/serverapp.go, deploy/strata.toml.example, docs/site/content/reference/env-vars.md, docs/site/content/architecture/sharding.md, CLAUDE.md, ROADMAP.md, scripts/ralph/prd.json.
+- strata-correctness-reviewer: clean (no goroutine leak/deadlock, page-cap not a semantic change, cursors append race-safe under mu + heap order content-driven, consistency pin defensive only).
+- **Learnings for future iterations:**
+  - TestEnvTOMLParity (internal/config/env_toml_parity_test.go) scans cmd/+internal/ for `("STRATA_X"` AND `= "STRATA_X"` literals. A const like `EnvFoo = "STRATA_FOO"` IS caught (assignment regex). So even a directly-os.Getenv'd knob (like GCDualWrite/SlowMS) must be wired through envMap + Config koanf field + strata.toml.example (commented line OK) + env-vars.md row, OR added to internal/config/exempt_env_vars.go. Skipping any of the 4 → parity test RED (not a build failure).
+  - config.go is NOT gofmt-clean on main (repo uses wider hand/tool alignment for envMap + some struct runs). Do NOT `gofmt -w` it — that churns the whole file. Match the EXISTING neighbor column alignment by hand. New struct field runs CAN be gofmt-clean if isolated; a doc-comment between fields BREAKS the gofmt alignment group (SlowMS became a singleton group → single-space, while ListConcurrency+TLS align together).
+  - The bounded fan-out only parallelises the OPEN phase (running each shard's first query); the heap-merge after wg/pool drains is single-goroutine. So the goroutine/connection-pool blowup was always in the open burst — a semaphore there is the whole fix. Cursors stay open for the merge lifetime (one bounded page each), so resident memory is still shardCount-linear in pages but with a SMALL constant page (256), not limit (≤1000).
+  - A single in-process store CAN discriminate the bounded-vs-unbounded fan-out at the HELPER level (TestRunBoundedFanOut_CapsConcurrency asserts peak in-flight ≤ concurrency) — no Cassandra needed for the goroutine-bound proof. The integration leg adds the read-after-write LOCAL_QUORUM + concurrent-list-stability proof that needs a real cluster. t.Fatalf is UNSAFE from spawned goroutines — listAll returns (keys,error); concurrent readers push err to a channel the test goroutine drains.
+---
+
+## 2026-06-02 - US-010 (Cassandra integration tests back on a CI gate)
+- Re-enabled the Cassandra meta.Store LWT/Paxos contract as a CI gate via a
+  DEDICATED job `.github/workflows/ci-cassandra.yml` (`integration-cassandra`,
+  ubuntu-latest, 30m). Runs the WHOLE `internal/meta/cassandra` integration
+  package: storetest contract (incl. GCQueueShardFanOut +
+  VersioningSuspendedReplaceNull) + US-001..US-005 shard/reshard cases
+  (PerBucketShardResolution / ReshardTransitional / ReshardDeleteMarkerNoResurrect
+  / ReshardWorkerMovesRows / ListBoundedFanOut) + bucket-stats probe + TLS.
+  Same PR+push trigger surface as ci.yml so it qualifies as a per-PR required check.
+- ROOT-CAUSE of the per-PR-runner Paxos starvation: testcontainers cassandra
+  module defaults to MAX_HEAP_SIZE=1024M / HEAP_NEWSIZE=128M; on a 2-vCPU runner
+  the tiny new-gen forces young-GC pauses that stall Paxos prepare/propose past
+  gocql's 60s timeout. Mitigation = shared env-overridable JVM-tuning helper
+  `internal/meta/cassandra/testcontainer_integration_test.go` (cassandraTuningOpts /
+  startCassandra / cassandraImage / envOr) bumping heap to 3072M/768M on the
+  dedicated job. Routed ALL Cassandra testcontainer call sites through it
+  (9 sites: 7 in store_integration_test.go + bucket_stats + bench + TLS inline).
+  Net dedup: ~12 lines of container boot/cleanup boilerplate per site collapsed to
+  `host := startCassandra(t)`.
+- Branch-protection required-check add documented as manual post-merge admin step
+  in tasks/qa-readiness-report.md §6.3 (mirrors the coverage-gate §6.2 step).
+- ROADMAP: close-flipped "Cassandra integration tests gated off per-PR CI" (P2)
+  + added the P3 follow-up (fold Cassandra back into the shared per-PR integration
+  job once heap tuning is proven on the shared runner) as the tracked owned must-fix.
+- Files changed: .github/workflows/ci-cassandra.yml (new),
+  internal/meta/cassandra/testcontainer_integration_test.go (new helper),
+  store_integration_test.go / store_bench_integration_test.go /
+  bucket_stats_probe_integration_test.go / tls_integration_test.go (routed
+  through helper, dropped unused tccassandra/context imports + dead ctx),
+  ROADMAP.md, tasks/qa-readiness-report.md, scripts/ralph/prd.json.
+- Verified locally: `CGO_ENABLED=0 GOWORK=off go vet -tags integration
+  ./internal/meta/cassandra/...` clean; YAML parses; gofmt clean on all edited
+  files. `make vet` default tag is UNAFFECTED (all changes are //go:build
+  integration test files + workflow + markdown — excluded from the default build).
+- **Learnings for future iterations:**
+  - testcontainers.WithEnv MERGES (maps.Copy) and the cassandra module appends
+    caller opts AFTER its own defaults, so passing WithEnv({MAX_HEAP_SIZE:..}) as
+    a Run customizer OVERRIDES the module default without dropping snitch/DC env.
+  - The cassandra module's default heap (128M new / 1024M max) is the real Paxos
+    starvation root cause on CPU-starved runners, not the gocql timeout.
+  - When you remove a `tccassandra.Run` call site you usually also strip an
+    otherwise-unused `ctx := context.Background()` — vet flags one func at a time;
+    use a per-func ctx-usage scan to find them all in one pass.
+  - CANNOT confirm the CI run is green from a local macOS/lima box (cgo/Xcode +
+    no Linux runner). Per .claude/rules/test-discipline.md "CI is the source of
+    truth" — the actual green `integration-cassandra` run must be confirmed on the
+    PR before the branch-protection step is applied.
+---
+
+## 2026-06-02 - US-011 End-to-end pre-prod validation walkthrough (CLOSES CYCLE)
+- Composite e2e walkthrough across BOTH labs in one pass. NEW
+  scripts/smoke-architecture-hardening.sh (make smoke-architecture-hardening,
+  added to .PHONY + recipe + a doc-comment block in Makefile). Six independent
+  legs, each PASS / WARN-skip (lab down) / FAIL:
+    A. Cassandra per-bucket non-default shard count + online 64->128 reshard
+       under concurrent writes + crash-resume — DELEGATES to smoke-reshard.sh
+       (no fork; reuse-harnesses rule). Propagates its exit 77 as a WARN-skip.
+    B. TiKV reshard parity (immediate-complete no-op): trigger via s3api admin
+       surface, poll to idle, assert shard_count flipped + object still reads.
+    C. DeleteObjects batch (idempotent: missing key = <Deleted> success row, 0
+       <Error>) + versioned delete -> x-amz-delete-marker:true. Runs on whichever
+       lab is up (TiKV preferred, Cassandra fallback).
+    D. Policy-UNION-ACL anon GET: asserts anon GET DENIED pre-policy (the
+       discriminator — else proof is vacuous), then PUT a Principal:"*"
+       s3:GetObject Allow, assert anon GET 200. Needs lab default
+       STRATA_AUTH_MODE=optional.
+    E. Console reshard UI via /admin/v1 cookie session: GET supported flag
+       (true Cassandra / false TiKV) + POST queue on Cassandra. Notes the
+       CI-only Playwright reshard-progress.spec.ts for the browser pass.
+    F. Plaintext chunk-corruption fail-loud: runs CGO_ENABLED=0 GOWORK=off
+       go test ./internal/data/{memory,rados}/ -run 'CRC|Checksum|FailsLoud'.
+       Runs even with NO lab up (a live gateway exposes no byte-flip hook by
+       design) — observed GREEN locally.
+- Runbook: docs/site/content/operate/pre-prod-validation.md (bring-up commands,
+  per-leg table, browser-pass note, env knobs).
+- Readiness note: tasks/architecture-hardening-readiness.md — pass/fail per leg
+  matrix. Leg F PASS (observed local); A-E PENDING-LAB each citing its green
+  discriminating per-PR/dedicated-CI test. Verdict: conditional GO pending one
+  observed REQUIRE_LAB=1 run with both labs up. Did NOT fabricate a green lab run
+  (no labs up locally + cgo block) — faithful-reporting + test-discipline rules.
+- ROADMAP: appended US-011 closing paragraph to the headline cycle P1 entry.
+- make vet: NO Go source changed (shell + Makefile + 2 markdown + prd/progress/
+  ROADMAP), so go vet ./... is unaffected by this story; local cgo/Xcode block is
+  pre-existing and orthogonal. Composite self-check on bare box: A-E WARN-skip,
+  F PASS, overall PASS exit 0.
+- Files: scripts/smoke-architecture-hardening.sh (new), Makefile,
+  docs/site/content/operate/pre-prod-validation.md (new),
+  tasks/architecture-hardening-readiness.md (new), ROADMAP.md, scripts/ralph/prd.json.
+- **Learnings for future iterations:**
+  - Composite/cycle-closing smoke pattern: aggregate per-leg PASS/WARN/FAIL with a
+    FAILURES counter (mirror scripts/smoke-supply-chain.sh), each leg lab_or_skip
+    its base, WARN-skip => exit 0, REQUIRE_LAB=1 => skip becomes FAIL. DELEGATE the
+    heavy single-feature legs to the existing per-feature smoke (smoke-reshard.sh)
+    instead of re-implementing — catch its exit 77 and downgrade to WARN.
+  - A live gateway has NO production chunk-corruption hook (by design — it would be
+    a data-integrity hole). So the e2e "fail-loud" leg can't byte-flip via S3; run
+    the data-layer CRC tests directly. internal/data/{memory,rados} build
+    CGO_ENABLED=0, so leg F runs even on the cgo-blocked macOS box — the only leg
+    that needs no lab.
+  - Policy-UNION-ACL e2e discriminator: assert anon GET is DENIED before attaching
+    the policy. Lab default STRATA_AUTH_MODE=optional lets anon reach the gate
+    (owner!=anon => ACL denies); the explicit policy Allow then unions to 200. If
+    the pre-policy GET already 200s, the lab isn't gating and the leg is
+    inconclusive (WARN, not a false PASS).
+  - Two reshard admin surfaces (recap): s3api /admin/bucket/reshard (SigV4,
+    owner==iam-root, used by leg B trigger) vs adminapi /admin/v1/buckets/{b}/reshard
+    (cookie session via POST /admin/v1/auth/login, used by leg E console). They are
+    NOT interchangeable — different auth.
+---

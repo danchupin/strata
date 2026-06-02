@@ -63,3 +63,6 @@ docs/site/.hugo_build.lock
 # (prerequisite of `docs-build` / `docs-serve`). Source of truth lives in
 # internal/adminapi/openapi.yaml.
 docs/site/static/openapi.yaml
+
+# Claude Code /schedule local lock (session artifact, not a repo deliverable)
+.claude/scheduled_tasks.lock
