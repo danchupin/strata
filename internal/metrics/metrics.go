@@ -244,11 +244,11 @@ var (
 
 	// ReconcileDanglingManifestsTotal counts dangling manifests (manifest
 	// present, a referenced chunk missing) found by the reconcile worker's
-	// meta->data pass (US-003), per resolution (report|quarantine).
+	// meta->data pass (US-003), per resolution (report|quarantine|delete).
 	ReconcileDanglingManifestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "strata_reconcile_dangling_manifests_total",
-			Help: "Dangling manifests found by the reconcile worker, per resolution (report|quarantine).",
+			Help: "Dangling manifests found by the reconcile worker, per resolution (report|quarantine|delete).",
 		},
 		[]string{"resolution"},
 	)

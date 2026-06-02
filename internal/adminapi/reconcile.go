@@ -44,6 +44,7 @@ type ReconcileJSON struct {
 	DanglingFound      int64  `json:"dangling_found"`
 	DanglingQuarantine int64  `json:"dangling_quarantine"`
 	DanglingReport     int64  `json:"dangling_report"`
+	DanglingDelete     int64  `json:"dangling_delete"`
 	Errors             int64  `json:"errors"`
 	Message            string `json:"message,omitempty"`
 	StartedAt          int64  `json:"started_at,omitempty"`
@@ -56,7 +57,8 @@ type ReconcileJSON struct {
 //     optional. Policy is report (default), gc, or restore (US-002b — rebuild
 //     the manifest row from the back-reference).
 //   - DANGLING (meta->data): Bucket set (the bucket NAME, resolved to its UUID
-//     here). Cluster/Pool ignored. Policy is report (default) or quarantine.
+//     here). Cluster/Pool ignored. Policy is report (default), quarantine, or
+//     delete (US-003b — GC the version's chunks + remove the row).
 type reconcilePostRequest struct {
 	Cluster   string `json:"cluster"`
 	Pool      string `json:"pool"`
@@ -87,6 +89,7 @@ func reconcileJSON(job *meta.ReconcileJob) ReconcileJSON {
 		DanglingFound:      job.DanglingFound,
 		DanglingQuarantine: job.DanglingQuarantine,
 		DanglingReport:     job.DanglingReport,
+		DanglingDelete:     job.DanglingDelete,
 		Errors:             job.Errors,
 		Message:            job.Message,
 		StartedAt:          unixOrZero(job.CreatedAt),

@@ -434,12 +434,14 @@ type ReconcileJob struct {
 	// Dangling-pass (US-003) counters: ManifestsScanned counts object versions
 	// walked; Healthy counts versions whose chunks all exist; DanglingFound
 	// counts versions with a missing chunk, broken down into DanglingQuarantine
-	// (marked unreadable) + DanglingReport (counted only, no mutation).
+	// (marked unreadable) + DanglingReport (counted only, no mutation) +
+	// DanglingDelete (US-003b — chunks GC-enqueued, version row removed).
 	ManifestsScanned   int64
 	Healthy            int64
 	DanglingFound      int64
 	DanglingQuarantine int64
 	DanglingReport     int64
+	DanglingDelete     int64
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -467,6 +469,15 @@ const (
 	// (QuarantineReason) so a GET/HEAD returns a clear error instead of a
 	// silent corrupt 5xx. Valid only for a bucket-scoped dangling job.
 	ReconcilePolicyQuarantine = "quarantine"
+	// ReconcilePolicyDelete is a DANGLING-pass (US-003b) policy: a manifest with
+	// a missing chunk is genuinely broken (the object can never be served), so
+	// the worker enqueues the version's chunks for GC (mirrors the US-002 gc
+	// care — the dual-write _by_cluster lookup stays in lockstep, GC dedups by
+	// OID so a re-run never double-deletes) and removes the object-version row.
+	// More aggressive than quarantine — only an operator who has decided the
+	// version is unrecoverable runs it. Valid only for a bucket-scoped dangling
+	// job.
+	ReconcilePolicyDelete = "delete"
 
 	ReconcileStateQueued  = "queued"
 	ReconcileStateRunning = "running"
@@ -483,10 +494,10 @@ func IsValidReconcilePolicy(p string) bool {
 }
 
 // IsValidDanglingPolicy reports whether p is a policy the US-003 DANGLING pass
-// can execute (report — count only; quarantine — mark the object unreadable).
-// delete is intentionally not yet offered (US-003b).
+// can execute (report — count only; quarantine — mark the object unreadable;
+// delete — GC the version's chunks + remove the row, US-003b).
 func IsValidDanglingPolicy(p string) bool {
-	return p == ReconcilePolicyReport || p == ReconcilePolicyQuarantine
+	return p == ReconcilePolicyReport || p == ReconcilePolicyQuarantine || p == ReconcilePolicyDelete
 }
 
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by

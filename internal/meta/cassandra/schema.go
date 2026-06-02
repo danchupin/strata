@@ -398,6 +398,7 @@ var tableDDL = []string{
 		dangling_found      bigint,
 		dangling_quarantine bigint,
 		dangling_report     bigint,
+		dangling_delete     bigint,
 		created_at     timestamp,
 		updated_at     timestamp
 	)`,
@@ -494,6 +495,7 @@ var alterStatements = []string{
 	`ALTER TABLE reconcile_jobs ADD dangling_found bigint`,
 	`ALTER TABLE reconcile_jobs ADD dangling_quarantine bigint`,
 	`ALTER TABLE reconcile_jobs ADD dangling_report bigint`,
+	`ALTER TABLE reconcile_jobs ADD dangling_delete bigint`,
 	`ALTER TABLE reconcile_jobs ADD orphans_restore bigint`,
 }
 

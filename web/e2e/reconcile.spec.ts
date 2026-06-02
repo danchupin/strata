@@ -36,6 +36,7 @@ interface ReconcileShape {
   dangling_found: number;
   dangling_quarantine: number;
   dangling_report: number;
+  dangling_delete: number;
   errors: number;
   message?: string;
   started_at?: number;
@@ -53,6 +54,7 @@ function zeroCounters() {
     dangling_found: 0,
     dangling_quarantine: 0,
     dangling_report: 0,
+    dangling_delete: 0,
     errors: 0,
   };
 }
@@ -220,6 +222,44 @@ test.describe('Strata console — reconcile page (US-006)', () => {
     );
     await expect(page.getByTestId('reconcile-message')).toContainText(
       'dangling pass complete',
+    );
+  });
+
+  test('dangling pass offers the delete policy and surfaces the Deleted counter (US-003b)', async ({
+    page,
+  }) => {
+    installReconcileRoutes(page, () => ({
+      ok: true,
+      id: JOB_ID,
+      bucket: '11111111-1111-1111-1111-111111111111',
+      policy: 'delete',
+      state: 'done',
+      ...zeroCounters(),
+      manifests_scanned: 200,
+      healthy: 198,
+      dangling_found: 2,
+      dangling_delete: 2,
+      message: 'dangling pass complete: 2 deleted',
+    }));
+    await gotoReconcile(page);
+
+    await page.getByTestId('reconcile-pass').click();
+    await page.getByRole('option', { name: /Dangling manifests/ }).click();
+    await expect(page.getByTestId('reconcile-bucket')).toBeVisible();
+
+    // The policy picker offers delete (a dangling-only US-003b policy).
+    await page.getByTestId('reconcile-policy').click();
+    await expect(page.getByRole('option', { name: /delete/ })).toBeVisible();
+    await page.getByRole('option', { name: /delete/ }).click();
+
+    await page.getByTestId('reconcile-bucket').fill('my-bucket');
+    await page.getByTestId('reconcile-submit').click();
+
+    await expect(page.getByTestId('reconcile-dangling-counters')).toContainText(
+      'Deleted',
+    );
+    await expect(page.getByTestId('reconcile-message')).toContainText(
+      '2 deleted',
     );
   });
 

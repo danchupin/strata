@@ -26,8 +26,9 @@ export type ReconcilePass = 'orphan' | 'dangling';
 // Orphan-pass policies. restore (US-002b) rebuilds the manifest row from the
 // back-reference for a genuinely-absent version.
 export type OrphanPolicy = 'report' | 'gc' | 'restore';
-// Dangling-pass policies.
-export type DanglingPolicy = 'report' | 'quarantine';
+// Dangling-pass policies. delete (US-003b) GCs the version's chunks + removes
+// the broken object row.
+export type DanglingPolicy = 'report' | 'quarantine' | 'delete';
 
 export interface ReconcileJob {
   ok: boolean;
@@ -50,6 +51,7 @@ export interface ReconcileJob {
   dangling_found: number;
   dangling_quarantine: number;
   dangling_report: number;
+  dangling_delete: number;
   errors: number;
   message?: string;
   started_at?: number;

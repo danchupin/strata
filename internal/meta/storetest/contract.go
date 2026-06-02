@@ -2644,6 +2644,37 @@ func caseReconcileJobRoundTrip(t *testing.T, s meta.Store) {
 		t.Fatalf("complete dangling: %v", err)
 	}
 
+	// delete is a dangling-only policy (US-003b) — accepted for a bucket-set
+	// job, and its DanglingDelete counter round-trips.
+	ddj, err := s.StartReconcile(ctx, "", "", "", "bkt-uuid", meta.ReconcilePolicyDelete)
+	if err != nil {
+		t.Fatalf("start dangling delete: %v", err)
+	}
+	if ddj.Policy != meta.ReconcilePolicyDelete {
+		t.Fatalf("dangling delete policy round-trip: %+v", ddj)
+	}
+	ddj.State = meta.ReconcileStateRunning
+	ddj.DanglingFound = 2
+	ddj.DanglingDelete = 2
+	if err := s.UpdateReconcileJob(ctx, ddj); err != nil {
+		t.Fatalf("update dangling delete: %v", err)
+	}
+	gotDDJ, err := s.GetReconcileJob(ctx, ddj.ID)
+	if err != nil {
+		t.Fatalf("get dangling delete: %v", err)
+	}
+	if gotDDJ.DanglingFound != 2 || gotDDJ.DanglingDelete != 2 {
+		t.Fatalf("dangling delete counter round-trip: %+v", gotDDJ)
+	}
+	gotDDJ.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, gotDDJ); err != nil {
+		t.Fatalf("complete dangling delete: %v", err)
+	}
+	// delete is invalid for an orphan (no-bucket) job.
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyDelete); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("delete on orphan job: got %v want ErrReconcileInvalidPolicy", err)
+	}
+
 	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "cls-cold", "", meta.ReconcilePolicyReport)
 	if err != nil {
 		t.Fatalf("start: %v", err)

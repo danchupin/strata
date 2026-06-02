@@ -439,6 +439,140 @@ func TestReconcileDanglingNoProber(t *testing.T) {
 	}
 }
 
+// --- US-003b dangling delete resolution + BackendRef probe --------------------
+
+// runDanglingDeleteJob runs a delete-policy dangling pass with a region so the
+// GC enqueue lands in a known queue the test can read back.
+func runDanglingDeleteJob(t *testing.T, s *memory.Store, prober ChunkProber, bid uuid.UUID, region string) *meta.ReconcileJob {
+	t.Helper()
+	ctx := context.Background()
+	w, err := New(Config{Meta: s, Prober: prober, Region: region})
+	if err != nil {
+		t.Fatalf("new worker: %v", err)
+	}
+	job, err := s.StartReconcile(ctx, "", "", "", bid.String(), meta.ReconcilePolicyDelete)
+	if err != nil {
+		t.Fatalf("start dangling delete reconcile: %v", err)
+	}
+	if _, err := w.RunOnce(ctx); err != nil {
+		t.Fatalf("run once: %v", err)
+	}
+	got, err := s.GetReconcileJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get job: %v", err)
+	}
+	return got
+}
+
+// TestReconcileDanglingDelete is the US-003b red/green: a dangling manifest
+// under the delete policy has its chunks enqueued for GC and its object-version
+// row removed; the healthy object and its chunk are untouched.
+func TestReconcileDanglingDelete(t *testing.T) {
+	s, bid, prober := seedDangling(t)
+	ctx := context.Background()
+	const region = "us"
+	got := runDanglingDeleteJob(t, s, prober, bid, region)
+
+	if got.State != meta.ReconcileStateDone {
+		t.Fatalf("state: got %q want done", got.State)
+	}
+	if got.DanglingFound != 1 || got.DanglingDelete != 1 {
+		t.Errorf("dangling: found=%d delete=%d want 1/1", got.DanglingFound, got.DanglingDelete)
+	}
+	if got.DanglingQuarantine != 0 || got.DanglingReport != 0 {
+		t.Errorf("delete policy must not quarantine/report: q=%d r=%d", got.DanglingQuarantine, got.DanglingReport)
+	}
+	if got.Errors != 0 {
+		t.Errorf("unexpected errors: %d", got.Errors)
+	}
+
+	// The broken object-version row is gone.
+	if _, err := s.GetObject(ctx, bid, "broken-key", ""); !errors.Is(err, meta.ErrObjectNotFound) {
+		t.Errorf("broken-key still present: err=%v want ErrObjectNotFound", err)
+	}
+	// Its chunk is enqueued for GC in the worker's region.
+	entries, err := s.ListGCEntries(ctx, region, time.Now().Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("list gc: %v", err)
+	}
+	var sawBroken bool
+	for _, e := range entries {
+		if e.Chunk.OID == "missing-uuid.00000" {
+			sawBroken = true
+		}
+	}
+	if !sawBroken {
+		t.Errorf("broken chunk not enqueued for GC: %+v", entries)
+	}
+	// The healthy object is untouched.
+	if _, err := s.GetObject(ctx, bid, "live-key", ""); err != nil {
+		t.Errorf("healthy live-key wrongly removed: %v", err)
+	}
+}
+
+// TestReconcileDanglingDeleteProbeErrorNeverDeletes proves a transient probe
+// error counts an error and removes nothing — never destroy on doubt.
+func TestReconcileDanglingDeleteProbeErrorNeverDeletes(t *testing.T) {
+	s, bid, _ := seedDangling(t)
+	ctx := context.Background()
+	prober := &fakeProber{err: context.DeadlineExceeded}
+	got := runDanglingDeleteJob(t, s, prober, bid, "us")
+
+	if got.DanglingDelete != 0 {
+		t.Errorf("delete on probe error: got %d want 0", got.DanglingDelete)
+	}
+	if got.Errors == 0 {
+		t.Errorf("probe error should be counted")
+	}
+	if _, err := s.GetObject(ctx, bid, "broken-key", ""); err != nil {
+		t.Errorf("must not remove on probe error: %v", err)
+	}
+}
+
+// TestReconcileDanglingBackendRefProbed proves the dangling pass probes the
+// single backing object of an S3-passthrough BackendRef manifest (no
+// Manifest.Chunks) — US-003b. The prober reports the backing key missing, so
+// the object is detected dangling and quarantined.
+func TestReconcileDanglingBackendRefProbed(t *testing.T) {
+	s, bid := seed(t)
+	ctx := context.Background()
+	br := &meta.Object{
+		BucketID:     bid,
+		Key:          "passthrough-key",
+		StorageClass: "STANDARD",
+		ETag:         "etag3",
+		Mtime:        time.Unix(1700000003, 0).UTC(),
+		Size:         7,
+		Manifest: &data.Manifest{
+			Class: "STANDARD",
+			Size:  7,
+			BackendRef: &data.BackendRef{
+				Backend: "s3",
+				Key:     "backing-object-key",
+				Cluster: "s3-a",
+				Size:    7,
+			},
+		},
+	}
+	if err := s.PutObject(ctx, br, false); err != nil {
+		t.Fatalf("put backendref object: %v", err)
+	}
+	// Prober holds live-key's chunk but NOT the backing-object key.
+	prober := &fakeProber{present: map[string]bool{"live-uuid.00000": true}}
+	got := runDanglingJob(t, s, prober, bid, meta.ReconcilePolicyQuarantine)
+
+	if got.DanglingFound != 1 || got.DanglingQuarantine != 1 {
+		t.Errorf("backendref dangling: found=%d quarantine=%d want 1/1", got.DanglingFound, got.DanglingQuarantine)
+	}
+	obj, err := s.GetObject(ctx, bid, "passthrough-key", "")
+	if err != nil {
+		t.Fatalf("get passthrough: %v", err)
+	}
+	if obj.QuarantineReason == "" {
+		t.Errorf("backendref object not quarantined")
+	}
+}
+
 // --- US-002b restore policy ---------------------------------------------------
 
 // putRestoreChunk writes payload to the memory data backend and returns the

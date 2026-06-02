@@ -657,3 +657,53 @@ Cycle: ralph/metadata-data-reconcile
     an empty obj.Manifest.Chunks and stampMultipartBackref no-ops there — the
     s3.Backend.StampBackref leg is exercised only at the backend unit seam.
 ---
+
+## 2026-06-03 - US-003b Reconcile dangling delete resolution + RADOS/S3 chunk prober
+- Added the `delete` dangling-pass policy + the real per-OID chunk probers so a
+  dangling-manifest job runs against the RADOS + S3-passthrough backends.
+- meta: `ReconcilePolicyDelete = "delete"`; `IsValidDanglingPolicy` accepts it
+  (orphan jobs still report|gc|restore); new `DanglingDelete` counter on
+  ReconcileJob. TiKV persists it free (full-struct JSON). Cassandra: additive
+  `dangling_delete bigint` column (DDL + ALTER) + projection/INSERT/UPDATE/Scan.
+- reconcile worker (`resolveDanglingDelete`): GC-enqueue the version's manifest
+  chunks THEN delete the version row (GC-before-row-delete — a crash leaves
+  chunks queued, never orphans live chunks; `_by_cluster` dual-write inherited
+  from EnqueueChunkDeletion stays in lockstep; GC dedups by OID so no
+  double-delete). `classifyDangling` now also probes the S3 passthrough single
+  backing object (BackendRef manifests, Chunks empty).
+- probers (`data.ChunkStater`): `cephimpl.ChunkExists` (per-OID rados Stat,
+  ENOENT->absent, ctx-guarded goroutine) + `s3.Backend.ChunkExists` (native
+  HEAD, 404/NotFound->absent). Worker wraps the prober in `rateLimitedProber`
+  reusing STRATA_RECONCILE_SCAN_RATE.
+- surfaced `dangling_delete` in s3api + adminapi reconcile responses, the web
+  console (policy option + Deleted counter), and the runbook + metrics help.
+- Files: internal/meta/store.go, internal/meta/cassandra/{reconcile,schema}.go,
+  internal/reconcile/reconcile.go, internal/data/rados/cephimpl/reconcile.go (new),
+  internal/data/s3/reconcile.go, cmd/strata/workers/reconcile.go,
+  internal/metrics/metrics.go, internal/s3api/admin.go, internal/adminapi/reconcile.go,
+  web/src/api/reconcile.ts, web/src/pages/Reconcile.tsx, web/dist (rebuilt),
+  docs/site/content/operate/metadata-data-reconcile.md, ROADMAP.md.
+  Tests: internal/reconcile/reconcile_test.go (delete + probe-error + BackendRef),
+  internal/data/s3/reconcile_test.go (new, RoundTripper HEAD harness),
+  internal/data/rados/cephimpl/reconcile_integration_test.go (new),
+  internal/meta/storetest/contract.go (delete accept + counter round-trip),
+  web/e2e/reconcile.spec.ts (delete policy + Deleted counter).
+- **Learnings for future iterations:**
+  - To delete one object VERSION row surgically (not S3 delete-marker semantics)
+    use `DeleteObject(ctx, bid, key, obj.VersionID, false)` — versioned=false +
+    a concrete non-empty version id (incl. the null sentinel UUID) hits the
+    exact-row match branch in both backends; an EMPTY versionID+versioned=false
+    deletes the latest/whole key, so always pass the concrete id.
+  - The S3-passthrough dangling probe needs `classifyDangling` to synthesize a
+    ChunkRef from `Manifest.BackendRef` (Chunks is empty for passthrough); the
+    S3 ChunkExists resolves the backing bucket from the class registry
+    (`bucketOnCluster("", cluster)`) when ChunkRef.Pool is empty.
+  - S3 HEAD 404 surfaces as `*s3types.NotFound` (not `*NoSuchKey` — HEAD has no
+    XML body); cover both + a generic smithy.APIError code in the not-found
+    classifier. Unit-test S3 backend logic with a custom http.RoundTripper via
+    `openTestBackend(t, rt)` — no real S3 / integration tag needed.
+  - Adding a ReconcileJob counter: TiKV is free (JSON struct), but Cassandra
+    needs the column in FIVE places — DDL, alterStatements, reconcileJobCols,
+    INSERT VALUES placeholder count, UPDATE SET, and the Scan var list (in
+    matching projection order). Plus the storetest contract round-trip.
+---

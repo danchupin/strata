@@ -23,12 +23,34 @@ func init() {
 
 // chunkProber returns the data backend as a reconcile.ChunkProber when it can
 // answer chunk-existence (data.ChunkStater), else nil. nil disables the
-// dangling pass for that backend (US-003b wires the RADOS leg).
-func chunkProber(d data.Backend) reconcile.ChunkProber {
-	if st, ok := d.(data.ChunkStater); ok {
+// dangling pass for that backend. The cephimpl RADOS backend (per-OID stat) and
+// the S3-passthrough backend (HEAD) implement data.ChunkStater (US-003b); the
+// probe is rate-limited (reuse STRATA_RECONCILE_SCAN_RATE) so a live-cluster
+// dangling walk does not saturate OSDs.
+func chunkProber(d data.Backend, ratePerSec int) reconcile.ChunkProber {
+	st, ok := d.(data.ChunkStater)
+	if !ok {
+		return nil
+	}
+	if ratePerSec <= 0 {
 		return st
 	}
-	return nil
+	return &rateLimitedProber{inner: st, lim: rados.NewScanLimiter(ratePerSec)}
+}
+
+// rateLimitedProber gates each chunk-existence probe through a token bucket so
+// the dangling-manifest walk's per-OID stat/HEAD load stays bounded (mirrors
+// the orphan-pass RADOSScanner's scan rate limit).
+type rateLimitedProber struct {
+	inner data.ChunkStater
+	lim   *rados.ScanLimiter
+}
+
+func (p *rateLimitedProber) ChunkExists(ctx context.Context, ref data.ChunkRef) (bool, error) {
+	if err := p.lim.Wait(ctx); err != nil {
+		return false, err
+	}
+	return p.inner.ChunkExists(ctx, ref)
 }
 
 // chunkScanner picks the orphan-pass scanner for the live backend. The
@@ -58,11 +80,13 @@ func buildReconcile(deps Dependencies) (Runner, error) {
 		// recompute a rebuilt manifest's single-part ETag.
 		Data: deps.Data,
 		// Prober drives the US-003 dangling-manifest pass (meta->data). The
-		// memory backend implements data.ChunkStater directly; a default-tag
-		// RADOS build does not (the per-OID stat is the US-003b split), so a
-		// dangling job there records an error and quarantines nothing — it
-		// never flags a healthy object on a probe it could not run.
-		Prober:          chunkProber(deps.Data),
+		// memory backend, the cephimpl RADOS backend (per-OID stat), and the
+		// S3-passthrough backend (HEAD) implement data.ChunkStater (US-003b);
+		// a default-tag (go-ceph-free) RADOS build does not, so a dangling job
+		// there records an error and quarantines/deletes nothing — it never
+		// flags a healthy object on a probe it could not run. The probe is
+		// rate-limited via STRATA_RECONCILE_SCAN_RATE.
+		Prober:          chunkProber(deps.Data, rados.ScanRateFromEnv()),
 		Region:          deps.Region,
 		Logger:          deps.Logger,
 		Obs:             metrics.ReconcileObserver{},

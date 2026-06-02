@@ -469,6 +469,7 @@ type adminReconcileResponse struct {
 	DanglingFound      int64  `json:"dangling_found"`
 	DanglingQuarantine int64  `json:"dangling_quarantine"`
 	DanglingReport     int64  `json:"dangling_report"`
+	DanglingDelete     int64  `json:"dangling_delete"`
 	Errors             int64  `json:"errors"`
 	Message            string `json:"message,omitempty"`
 }
@@ -488,8 +489,9 @@ type adminReconcileResponse struct {
 //     genuinely-absent version (plaintext-only; gaps + SSE reported, never
 //     served).
 //   - DANGLING pass (US-003, meta->data): bucket=<name> present. Walks the
-//     bucket's manifests and probes each chunk; policy (report|quarantine,
-//     default report). cluster/pool are not required.
+//     bucket's manifests and probes each chunk; policy (report|quarantine|
+//     delete, default report). delete (US-003b) GCs the version's chunks and
+//     removes the row. cluster/pool are not required.
 func (s *Server) adminReconcile(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	bucketName := q.Get("bucket")
@@ -582,6 +584,7 @@ func reconcileResponse(job *meta.ReconcileJob) adminReconcileResponse {
 		DanglingFound:      job.DanglingFound,
 		DanglingQuarantine: job.DanglingQuarantine,
 		DanglingReport:     job.DanglingReport,
+		DanglingDelete:     job.DanglingDelete,
 		Errors:             job.Errors,
 		Message:            job.Message,
 	}

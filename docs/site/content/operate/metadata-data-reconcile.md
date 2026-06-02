@@ -104,8 +104,8 @@ Query params:
   (optional — empty = default namespace; `\x01` = all namespaces),
   `policy` (`report` | `gc`, default `report`).
 - **Dangling pass:** `bucket=<name>` (required; resolved to its UUID),
-  `policy` (`report` | `quarantine`, default `report`). `cluster` /
-  `pool` are not used.
+  `policy` (`report` | `quarantine` | `delete`, default `report`).
+  `cluster` / `pool` are not used.
 
 ### Step 2 — Watch the job converge + read the summary
 
@@ -124,7 +124,7 @@ for a go/no-go:
 | `orphans_found` / `orphans_gc` / `orphans_report` | orphan chunks, by resolution |
 | `absent_backref` | chunks with **no** back-reference — counted, **never deleted** (you can't attribute them, so you can't safely destroy them) |
 | `manifests_scanned` / `healthy` | dangling pass progress |
-| `dangling_found` / `dangling_quarantine` / `dangling_report` | broken manifests, by resolution |
+| `dangling_found` / `dangling_quarantine` / `dangling_report` / `dangling_delete` | broken manifests, by resolution |
 | `errors` | per-chunk errors skipped (never delete on doubt) |
 
 > **Web console (US-006).** The same trigger + progress + summary is
@@ -161,8 +161,21 @@ the object unreadable so a `GET` / `HEAD` returns a clear
 curl -s -X POST 'http://strata/admin/reconcile?bucket=my-bucket&policy=quarantine'
 ```
 
-> `delete` resolution for dangling manifests is split to US-003b;
-> `IsValidDanglingPolicy` accepts only `report` | `quarantine` today.
+**Dangling manifests** (`policy=delete`, US-003b) — once you have decided
+the version is unrecoverable, `delete` enqueues the version's chunks for
+GC (the dual-write `_by_cluster` lookup stays in lockstep; GC dedups by
+OID so a re-run never double-deletes) and removes the object-version row.
+More aggressive than `quarantine` — review the `report` summary first:
+
+```bash
+curl -s -X POST 'http://strata/admin/reconcile?bucket=my-bucket&policy=delete'
+```
+
+> The dangling pass needs a real chunk prober: the RADOS backend probes
+> via a per-OID `rados stat`, the S3-passthrough backend via a native
+> `HEAD` (both rate-limited by `STRATA_RECONCILE_SCAN_RATE`). A go-ceph-free
+> build has no prober and records an error rather than flag/delete a
+> healthy object on a probe it could not run.
 
 ### Step 4 — `rebuild-index` (last resort, only if the meta backup is unusable)
 
@@ -239,7 +252,7 @@ The worker emits per-iteration metrics (`strata_worker_iteration_total`
 |---|---|
 | `strata_reconcile_chunks_scanned_total` | data-tier chunks visited |
 | `strata_reconcile_orphans_found_total{resolution}` | orphan chunks, `resolution=report\|gc` |
-| `strata_reconcile_dangling_manifests_total{resolution}` | dangling manifests, `resolution=report\|quarantine` |
+| `strata_reconcile_dangling_manifests_total{resolution}` | dangling manifests, `resolution=report\|quarantine\|delete` |
 | `strata_reconcile_errors_total` | per-chunk errors skipped (never deleted on doubt) |
 
 The scan is rate-limited via `STRATA_RECONCILE_SCAN_RATE` (objects/sec,

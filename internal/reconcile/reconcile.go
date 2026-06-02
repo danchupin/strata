@@ -340,7 +340,8 @@ const danglingListPageSize = 500
 // and probes that each manifest-referenced chunk still exists in the data
 // tier. A version with a missing chunk is dangling and is resolved by the job
 // policy (report — count only; quarantine — mark the object unreadable so a
-// GET/HEAD returns a clear error instead of a silent corrupt 5xx). Resumes
+// GET/HEAD returns a clear error instead of a silent corrupt 5xx; delete —
+// GC the version's chunks + remove the row, US-003b). Resumes
 // from job.Cursor (the key marker) and persists progress every CheckpointEvery
 // manifests; writes a per-bucket summary on a clean drain.
 func (w *Worker) runDanglingJob(ctx context.Context, job *meta.ReconcileJob) error {
@@ -393,7 +394,8 @@ func (w *Worker) runDanglingJob(ctx context.Context, job *meta.ReconcileJob) err
 		"job", job.ID, "bucket", job.Bucket, "policy", job.Policy,
 		"manifests_scanned", job.ManifestsScanned, "healthy", job.Healthy,
 		"dangling", job.DanglingFound, "dangling_quarantine", job.DanglingQuarantine,
-		"dangling_report", job.DanglingReport, "errors", job.Errors)
+		"dangling_report", job.DanglingReport, "dangling_delete", job.DanglingDelete,
+		"errors", job.Errors)
 	return nil
 }
 
@@ -401,17 +403,32 @@ func (w *Worker) runDanglingJob(ctx context.Context, job *meta.ReconcileJob) err
 // manifest by the job policy. Mutates the job's in-memory counters.
 func (w *Worker) classifyDangling(ctx context.Context, job *meta.ReconcileJob, obj *meta.Object) error {
 	job.ManifestsScanned++
-	// Delete markers, backend-ref objects, and zero-chunk manifests carry no
-	// data-tier chunks to probe — never dangling.
-	if obj.IsDeleteMarker || obj.Manifest == nil || len(obj.Manifest.Chunks) == 0 {
+	// Delete markers carry no data-tier bytes to probe — never dangling.
+	if obj.IsDeleteMarker || obj.Manifest == nil {
+		job.Healthy++
+		return nil
+	}
+	// danglingProbeRefs are the data-tier objects whose existence proves the
+	// manifest is serviceable: the chunk-shape Chunks for the RADOS backend, or
+	// the single backing object for an S3-passthrough BackendRef manifest
+	// (US-003b — the S3 backend probes it via a native HEAD). A zero-chunk,
+	// no-BackendRef manifest (e.g. an empty object) has nothing to probe.
+	probeRefs := obj.Manifest.Chunks
+	if len(probeRefs) == 0 && obj.Manifest.BackendRef != nil {
+		br := obj.Manifest.BackendRef
+		// Pool empty -> the S3 ChunkExists resolves the backing bucket from its
+		// class registry; OID is the backing-object key.
+		probeRefs = []data.ChunkRef{{Cluster: br.Cluster, OID: br.Key}}
+	}
+	if len(probeRefs) == 0 {
 		job.Healthy++
 		return nil
 	}
 	missing := false
-	for _, ch := range obj.Manifest.Chunks {
+	for _, ch := range probeRefs {
 		ok, err := w.cfg.Prober.ChunkExists(ctx, ch)
 		if err != nil {
-			// Uncertain (transient probe error): never quarantine on doubt.
+			// Uncertain (transient probe error): never quarantine/delete on doubt.
 			job.Errors++
 			w.cfg.Obs.ReconcileError()
 			return nil
@@ -438,11 +455,42 @@ func (w *Worker) classifyDangling(ctx context.Context, job *meta.ReconcileJob, o
 		}
 		job.DanglingQuarantine++
 		w.cfg.Obs.DanglingFound(meta.ReconcilePolicyQuarantine)
+	case meta.ReconcilePolicyDelete:
+		w.resolveDanglingDelete(ctx, job, obj)
 	default: // report (the safe default — count only, no mutation)
 		job.DanglingReport++
 		w.cfg.Obs.DanglingFound(meta.ReconcilePolicyReport)
 	}
 	return nil
+}
+
+// resolveDanglingDelete removes a confirmed-dangling object version: it first
+// enqueues the version's manifest chunks for GC (mirrors the US-002 gc care —
+// EnqueueChunkDeletion dual-writes the _by_cluster lookup, and GC dedups by OID
+// so a re-run never double-deletes; the one already-missing chunk is harmless
+// to enqueue, the GC worker treats a NoSuchKey delete as terminal) THEN deletes
+// the object-version row. GC-before-row-delete is the safe order: a crash
+// between the two leaves the chunks queued for deletion (the object is already
+// unreadable) rather than orphaning live chunks whose only owner row is gone.
+// A failure at either step counts an error and leaves the row in place so a
+// re-run re-detects and re-resolves (idempotent).
+func (w *Worker) resolveDanglingDelete(ctx context.Context, job *meta.ReconcileJob, obj *meta.Object) {
+	if obj.Manifest != nil && len(obj.Manifest.Chunks) > 0 {
+		if err := w.cfg.Meta.EnqueueChunkDeletion(ctx, w.cfg.Region, obj.Manifest.Chunks); err != nil {
+			job.Errors++
+			w.cfg.Obs.ReconcileError()
+			return
+		}
+	}
+	// Delete the exact version row (versioned=false addresses the row by its
+	// concrete version id, including the null-version sentinel).
+	if _, err := w.cfg.Meta.DeleteObject(ctx, obj.BucketID, obj.Key, obj.VersionID, false); err != nil {
+		job.Errors++
+		w.cfg.Obs.ReconcileError()
+		return
+	}
+	job.DanglingDelete++
+	w.cfg.Obs.DanglingFound(meta.ReconcilePolicyDelete)
 }
 
 // manifestReferencesOID reports whether m references the chunk OID. A nil

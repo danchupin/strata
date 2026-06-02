@@ -116,6 +116,10 @@ export function ReconcilePage() {
               value: 'quarantine',
               label: 'quarantine — mark object unreadable',
             },
+            {
+              value: 'delete',
+              label: 'delete — GC chunks + remove broken object',
+            },
           ],
     [pass],
   );
@@ -404,6 +408,7 @@ function ReconcileStatus({
             <Counter label="Dangling found" value={job.dangling_found} />
             <Counter label="Quarantined" value={job.dangling_quarantine} />
             <Counter label="Reported" value={job.dangling_report} />
+            <Counter label="Deleted" value={job.dangling_delete} />
             <Counter label="Errors" value={job.errors} tone="error" />
           </div>
         )}

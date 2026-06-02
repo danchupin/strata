@@ -3,9 +3,12 @@ package s3
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 
 	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
+	s3types "github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 
 	"github.com/danchupin/strata/internal/data"
 )
@@ -91,3 +94,81 @@ func (b *Backend) readBackref(ctx context.Context, c *s3Cluster, bucket, key str
 }
 
 var _ data.ChunkLister = (*Backend)(nil)
+
+// ChunkExists implements data.ChunkStater (US-003b): it answers whether the
+// referenced backing object still exists by issuing a native HeadObject. The
+// reconcile worker's dangling-manifest pass (meta->data) probes the single
+// backing object of an S3-passthrough BackendRef manifest through it — a HEAD
+// that 404s means the external object was deleted out from under the meta row.
+//
+// ref mapping: ref.Cluster selects the cluster (empty -> the single registered
+// cluster); ref.Pool is the backing bucket when set (the rebalance chunk-shape
+// manifest carries it), else the bucket is resolved from the cluster's class
+// registry (bucketOnCluster — the common one-bucket-per-cluster passthrough
+// shape); ref.OID is the backing-object key. A missing object returns
+// (false, nil); a successful HEAD returns (true, nil); any other error is
+// returned verbatim so the worker counts an error and never flags a healthy
+// object on a probe it could not run.
+func (b *Backend) ChunkExists(ctx context.Context, ref data.ChunkRef) (bool, error) {
+	if ref.OID == "" {
+		return false, errors.New("s3 chunk-exists: oid (backing key) required")
+	}
+	var (
+		c      *s3Cluster
+		bucket string
+		err    error
+	)
+	if ref.Cluster == "" {
+		c, bucket, err = b.singleCluster(ctx)
+		if err != nil {
+			return false, err
+		}
+	} else {
+		c, err = b.connFor(ctx, ref.Cluster)
+		if err != nil {
+			return false, err
+		}
+		bucket = ref.Pool
+		if bucket == "" {
+			bucket = b.bucketOnCluster("", ref.Cluster)
+		}
+	}
+	if bucket == "" {
+		return false, fmt.Errorf("s3 chunk-exists: no backing bucket for cluster %q", ref.Cluster)
+	}
+	key := ref.OID
+	opCtx, cancel := opCtxFor(ctx, c.opTimeout)
+	defer cancel()
+	if _, err := c.client.HeadObject(opCtx, &awss3.HeadObjectInput{Bucket: &bucket, Key: &key}); err != nil {
+		if isS3NotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("s3: head %s: %w", key, err)
+	}
+	return true, nil
+}
+
+// isS3NotFound reports whether err is an S3 object-missing error. HEAD returns
+// no XML body, so the SDK surfaces a typed *NotFound rather than *NoSuchKey;
+// some S3-compatible backends instead return a generic API error coded
+// NotFound/NoSuchKey — accept both shapes.
+func isS3NotFound(err error) bool {
+	var notFound *s3types.NotFound
+	if errors.As(err, &notFound) {
+		return true
+	}
+	var noSuchKey *s3types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NotFound", "NoSuchKey", "404":
+			return true
+		}
+	}
+	return false
+}
+
+var _ data.ChunkStater = (*Backend)(nil)

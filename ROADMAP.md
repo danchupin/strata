@@ -673,15 +673,19 @@ Non-goals:
   (`cursor=""`) to rebuild a straddling version, so the "resumable from a Cursor watermark" guarantee is weaker for
   `restore` than for `report`/`gc`. Fix direction: persist the accumulator, order the scan so a version's chunks are
   contiguous, or only resolve groups whose `chunk_idx=0` was seen this pass. (`ralph/metadata-data-reconcile` US-002b)
-- **P3 — Reconcile dangling-manifest `delete` resolution + RADOS/S3 chunk prober deferred (US-003 split).** The
-  reconcile worker now ships the meta→data dangling-manifest pass (US-003): a bucket-scoped job walks every object
-  version's manifest and probes each chunk via `reconcile.ChunkProber` (`data.ChunkStater`), resolving a dangling
-  manifest by the `report` (default — count only) or `quarantine` (mark the object unreadable so a GET/HEAD returns
-  `503 ObjectQuarantined` instead of a silent corrupt 5xx) policy. Two pieces are split out: (1) the `delete`
-  resolution (`meta.IsValidDanglingPolicy` accepts only `report|quarantine` today); (2) the real chunk prober for the
-  RADOS + S3-passthrough backends — only the memory backend implements `data.ChunkStater` so far (CI-green via the
-  injected fake prober), so a dangling job against a default-tag RADOS build records an error and quarantines nothing
-  (never flags a healthy object on a probe it could not run). Tracked as `US-003b` (to add). (`ralph/metadata-data-reconcile` US-003)
+- ~~**P3 — Reconcile dangling-manifest `delete` resolution + RADOS/S3 chunk prober deferred (US-003 split).**~~ —
+  **Done.** `meta.IsValidDanglingPolicy` now accepts `delete`: a bucket-scoped dangling job under the `delete` policy
+  enqueues the version's manifest chunks for GC (GC-before-row-delete order — a crash leaves chunks queued rather than
+  orphaning live chunks; the `_by_cluster` dual-write stays in lockstep; GC dedups by OID so a re-run never
+  double-deletes) then removes the object-version row via `DeleteObject` (the concrete version id, incl. the
+  null-version sentinel). The real chunk probers ship: `cephimpl.ChunkExists` (per-OID rados `Stat`, ENOENT→absent)
+  and `s3.Backend.ChunkExists` (native `HEAD`, 404→absent), both behind `data.ChunkStater` and rate-limited via
+  `STRATA_RECONCILE_SCAN_RATE` (`rateLimitedProber` in the worker wiring); `classifyDangling` now also probes the S3
+  passthrough single backing object (BackendRef manifests). A probe error still counts an error and never
+  flags/deletes a healthy object. New `dangling_delete` counter (3-backend lockstep, additive Cassandra column),
+  surfaced in the admin API + web console. RADOS + S3 legs are integration-tested
+  (`cephimpl/reconcile_integration_test.go`; the S3 leg is unit-tested via the RoundTripper harness).
+  (commit `52c0ec4`) (`ralph/metadata-data-reconcile` US-003b)
 - **P2 — `rebuild-index` SSE-algo stamping at PUT + RADOS end-to-end integration deferred (US-004 split).** The
   last-resort `strata admin rebuild-index` (US-004) ships the full reconstruction ENGINE (`internal/rebuild`):
   it groups scanned chunks by their US-001 back-reference `{bucket_id, key, version_id}`, orders by `chunk_idx`,
