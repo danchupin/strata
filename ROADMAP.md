@@ -105,13 +105,18 @@ adding more, prove what is there.
   exactly-1000 boundary accepted), and a versioned-bucket leg (no-versionId delete creates a
   delete marker, explicit `?versionId` removes that version, deleting the marker's own version
   restores the prior latest). Sanity-checked red against a deliberately-broken assertion. (commit `ba7131d`)
-- **P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**
-  Neither the memory nor the RADOS data plane carries a per-chunk checksum verified on read,
-  so a flipped byte inside a *plaintext* chunk returns a full-length corrupted `200`. Only
-  *truncation* / missing-chunk fails loud (`data.ErrNotFound`), and SSE objects are caught by
-  the AEAD layer. Surfaced + accepted (defence-in-depth, superseded by SSE) in the
-  `ralph/qa-production-readiness` cycle (US-011). Fix scope: store a per-chunk CRC/sha in the
-  manifest `ChunkRef` and verify on `GetChunks`; fail loud on mismatch.
+- ~~**P3 — Plaintext (non-SSE) at-rest byte-flip is not detected on the read path (QA-cycle R9).**~~
+  — **Done.** `data.ChunkRef` now carries a per-chunk CRC32C (Castagnoli) — proto field 6
+  `crc32c` + Go `Checksum uint32` (`json:",omitempty"`), stamped at `PutChunks` time
+  (memory: in-loop; RADOS: centrally in `PutChunksParallel`). The read path verifies each
+  chunk against it and fails loud with `data.ErrChecksumMismatch` (memory `memReader`;
+  RADOS `prefetchReader.fetchSegment`) — a flipped byte now aborts the stream instead of
+  returning a corrupted `200`. Zero == absent: pre-US-009 rows decode with no checksum and
+  skip verification. Range-GET boundary handling is option (a): a partial boundary chunk is
+  fetched in full, verified, then sliced (interior chunks always verified). Verification
+  on by default, env opt-out `STRATA_CHUNK_CRC_VERIFY=false`. SSE unaffected (AEAD already
+  covers it). Red/green proof in `internal/data/memory/corruption_test.go` +
+  `internal/data/rados/prefetch_test.go`. (commit `<pending>`)
 - ~~**P1 — Single-binary `strata` (CockroachDB-shape).**~~ — **Done.** Single `strata`
   binary with `server` + `admin` subcommands; `strata server` runs the gateway plus an
   opt-in subset of workers (gc, lifecycle, notify, replicator, access-log, inventory,

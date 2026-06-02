@@ -13,8 +13,8 @@ func sampleManifest() *Manifest {
 		ChunkSize: 4 * 1024 * 1024,
 		ETag:      `"abc123"`,
 		Chunks: []ChunkRef{
-			{Cluster: "default", Pool: "rgw.buckets.data", Namespace: "", OID: "k/0", Size: 4 * 1024 * 1024},
-			{Cluster: "default", Pool: "rgw.buckets.data", Namespace: "ns", OID: "k/1", Size: 17},
+			{Cluster: "default", Pool: "rgw.buckets.data", Namespace: "", OID: "k/0", Size: 4 * 1024 * 1024, Checksum: 0xdeadbeef},
+			{Cluster: "default", Pool: "rgw.buckets.data", Namespace: "ns", OID: "k/1", Size: 17, Checksum: 0x12345678},
 		},
 		PartChunks: []PartRange{
 			{PartNumber: 1, Offset: 0, Size: 5 * 1024 * 1024, ETag: "p1etag", ChecksumAlgorithm: "SHA256", ChecksumValue: "p1cs"},

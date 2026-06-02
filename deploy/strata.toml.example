@@ -11,6 +11,10 @@ data_backend = "rados"         # "memory" | "rados"
 meta_backend = "cassandra"     # "memory" | "cassandra"
 shutdown_wait = "10s"
 default_bucket_shards = 64
+# Read-path per-chunk CRC32C verification (US-009). Default on; a byte-flip
+# in a stored plaintext chunk then fails the read loud instead of returning a
+# corrupted 200. Set false to disable (operator escape hatch).
+chunk_crc_verify = true
 
 # Comma-separated CIDR list (IPv4 / IPv6) of upstream proxies allowed to
 # set X-Forwarded-* and X-Real-IP headers. Default empty → forwarded

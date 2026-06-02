@@ -156,8 +156,8 @@
         "Tests pass"
       ],
       "priority": 9,
-      "passes": false,
-      "notes": ""
+      "passes": true,
+      "notes": "Done. ChunkRef.Checksum CRC32C (proto f6), stamped at PutChunks (memory + RADOS coordinator), verified full-chunk on read (memReader + prefetch fetchSegment, option-a range boundary), ErrChecksumMismatch fail-loud, zero==absent legacy skip, STRATA_CHUNK_CRC_VERIFY default on. Red/green proof in corruption_test.go + prefetch_test.go."
     },
     {
       "id": "US-012",

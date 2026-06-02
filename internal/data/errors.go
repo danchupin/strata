@@ -47,6 +47,15 @@ var ErrRADOSNotCompiled = errors.New("data: rados backend not compiled (use ceph
 // never re-consult the picker).
 var ErrDrainRefused = errors.New("data: PUT refused — target cluster is draining")
 
+// ErrChecksumMismatch is the sentinel returned by the read path
+// (GetChunks) when a stored chunk's bytes no longer match the CRC32C
+// recorded on its ChunkRef at PutChunks time (US-009). It signals
+// at-rest corruption (a plaintext byte-flip) and MUST fail the read
+// loud — surfaced as a 5xx / aborted stream, never a silent short or a
+// corrupted 200. SSE objects are unaffected (their AEAD tag already
+// detects tampering before plaintext is emitted).
+var ErrChecksumMismatch = errors.New("data: chunk checksum mismatch (at-rest corruption)")
+
 // DrainRefusedError carries the resolved cluster id alongside
 // ErrDrainRefused so the gateway can surface it on the wire and the
 // metric stamp the cluster label. Implementations construct via

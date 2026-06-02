@@ -258,3 +258,27 @@ Cycle: ralph/architecture-hardening
 - Local default-tag build/test dies on Xcode license (runtime/cgo) and CGO_ENABLED=0 dies on gosigar/darwin;
   scope tests to the changed packages with CGO_ENABLED=0 and lean on CI Linux.
 ---
+
+## 2026-06-02 - US-009
+- Per-chunk CRC32C on the read path, fail-loud (closes R9). Bulk of the field/proto/helper scaffolding was already in the working tree (crc.go, ChunkRef.Checksum, manifest.proto f6 crc32c, pb.go); finished the wiring + read-path verification + tests.
+- Files changed:
+  - internal/data/errors.go: NEW ErrChecksumMismatch sentinel (was referenced by crc.go but undefined — build was broken).
+  - internal/data/manifest_codec.go: map Checksum<->Crc32C both encode + decode directions.
+  - internal/data/memory/backend.go: stamp CRC in PutChunks; verify WHOLE chunk in memReader.seekToChunk before slicing; added deterministic CorruptChunkByOID test helper.
+  - internal/data/rados/parallel.go: stamp CRC centrally in PutChunksParallel coordinator (covers cephimpl free).
+  - internal/data/rados/prefetch.go: new fetchSegment — option (a) full-chunk verify on range boundaries (partial segment refetches the whole chunk, verifies, then slices).
+  - internal/config/config.go: ChunkCRCVerify bool (default true) + STRATA_CHUNK_CRC_VERIFY env map + parity docs (deploy/strata.toml.example, docs/.../env-vars.md).
+  - internal/serverapp/serverapp.go: data.SetChunkCRCVerify(cfg.ChunkCRCVerify) at startup.
+  - Tests: memory/corruption_test.go (mismatch/clean/range-boundary/opt-out/legacy-zero), rados/prefetch_test.go (mismatch/range-boundary/clean), rados/parallel_test.go (write-path stamp assertion), manifest_codec_test.go (checksum round-trip), config/misc_test.go (default+opt-out).
+  - ROADMAP.md R9 close-flipped.
+- Review (review-strata correctness tests): correctness CLEAN no-blocking. Tests reviewer caught 2 issues, BOTH FIXED:
+  - HIGH/flake: CorruptFirstChunk flips a RANDOM map entry (map iteration), so the range-boundary memory test only hit chunk0 ~half the time → flaky under CI -race. Fixed via deterministic CorruptChunkByOID(m.Chunks[0].OID).
+  - suggestion: no direct assertion on the RADOS coordinator stamp (deleting parallel.go:96 left all tests green). Added TestPutChunksParallelStampsCRC.
+- **Learnings for future iterations:**
+  - CorruptFirstChunk in memory backend is NON-DETERMINISTIC (b.chunks is a map). For any CRC/range test that must hit a SPECIFIC chunk, use CorruptChunkByOID(oid) — pass m.Chunks[i].OID. Full-read no-error tests can keep CorruptFirstChunk.
+  - Read-path CRC option (a): partial range-boundary chunks are refetched in FULL and verified before slicing (a windowed CRC would false-positive vs the stored full-chunk CRC). Interior chunks already full. Cost: a boundary range GET reads the whole 4 MiB boundary chunk.
+  - zero==absent is the legacy-skip sentinel: VerifyChunk and prefetch fetchSegment both no-op when ref.Checksum==0. Tests must clear checksums to simulate pre-US-009 rows.
+  - config default-true bool: set it in defaults() (struct provider loads it), koanf env override only fires on non-empty STRATA_* — string "false" parses to bool false fine (BatchOps precedent). Parity test (TestEnvTOMLParity) REQUIRES a matching line in deploy/strata.toml.example AND a row in docs/site/content/reference/env-vars.md for every new Config field.
+  - CRC stamping is CENTRAL in PutChunksParallel (rados coordinator) so cephimpl + any chunk-based backend inherits it; memory stamps in its own loop. S3 backend is whole-object pass-through (BackendRef, no plaintext chunks we own) — out of scope.
+  - Local macOS box: cgo/Xcode-license blocks building any package that transitively pulls tikv (gosigar) or net cgo (s3/serverapp). data/memory/rados/config build+test fine without cgo. CI Linux is source of truth.
+---

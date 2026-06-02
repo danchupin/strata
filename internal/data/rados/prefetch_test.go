@@ -357,6 +357,94 @@ func TestPrefetchReaderRangeStopsBeforeUnneededChunks(t *testing.T) {
 	}
 }
 
+// stampChecksums fills in ChunkRef.Checksum from the stored bytes so the
+// US-009 read-path verification has a baseline to compare against.
+func stampChecksums(m *data.Manifest, stored map[string][]byte) {
+	for i := range m.Chunks {
+		m.Chunks[i].Checksum = data.ComputeChunkCRC(stored[m.Chunks[i].OID])
+	}
+}
+
+// TestPrefetchReaderCRCMismatchFailsLoud is the US-009 red/green proof for
+// the RADOS read scheduler: a byte flipped in a stored chunk fails the full
+// read loud with data.ErrChecksumMismatch.
+func TestPrefetchReaderCRCMismatchFailsLoud(t *testing.T) {
+	const chunkSize = 64
+	src := bytes.Repeat([]byte{'A'}, chunkSize*3)
+	m, stored := chunkedManifest(src, chunkSize)
+	stampChecksums(m, stored)
+
+	stored["oid.00001"][0] ^= 0xFF // corrupt the middle chunk at rest
+
+	r, err := newPrefetchReader(context.Background(), m, 0, m.Size, 4, storedGetFn(stored))
+	if err != nil {
+		t.Fatalf("newPrefetchReader: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	_, err = io.ReadAll(r)
+	if !errors.Is(err, data.ErrChecksumMismatch) {
+		t.Fatalf("corrupted full read: want ErrChecksumMismatch, got %v", err)
+	}
+}
+
+// TestPrefetchReaderCRCRangeBoundaryVerifies pins option (a): a Range read
+// touching only part of a corrupted boundary chunk still fails loud because
+// the whole chunk is fetched and verified before slicing.
+func TestPrefetchReaderCRCRangeBoundaryVerifies(t *testing.T) {
+	const chunkSize = 64
+	src := bytes.Repeat([]byte{'B'}, chunkSize*3)
+	m, stored := chunkedManifest(src, chunkSize)
+	stampChecksums(m, stored)
+
+	stored["oid.00000"][10] ^= 0xFF // corrupt first chunk
+
+	// Window entirely inside the corrupted first chunk: bytes [4, 12).
+	r, err := newPrefetchReader(context.Background(), m, 4, 8, 4, storedGetFn(stored))
+	if err != nil {
+		t.Fatalf("newPrefetchReader: %v", err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	_, err = io.ReadAll(r)
+	if !errors.Is(err, data.ErrChecksumMismatch) {
+		t.Fatalf("corrupted boundary range read: want ErrChecksumMismatch, got %v", err)
+	}
+}
+
+// TestPrefetchReaderCRCCleanReadAndRange is the green control: an untampered
+// object reads back byte-for-byte both full and ranged with verification on.
+func TestPrefetchReaderCRCCleanReadAndRange(t *testing.T) {
+	const chunkSize = 32
+	src := make([]byte, chunkSize*4)
+	for i := range src {
+		src[i] = byte(i)
+	}
+	m, stored := chunkedManifest(src, chunkSize)
+	stampChecksums(m, stored)
+
+	// Full read.
+	r, err := newPrefetchReader(context.Background(), m, 0, m.Size, 4, storedGetFn(stored))
+	if err != nil {
+		t.Fatalf("newPrefetchReader full: %v", err)
+	}
+	got, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil || !bytes.Equal(got, src) {
+		t.Fatalf("clean full read: err=%v equal=%v", err, bytes.Equal(got, src))
+	}
+
+	// Boundary-crossing range.
+	r2, err := newPrefetchReader(context.Background(), m, 24, 24, 4, storedGetFn(stored))
+	if err != nil {
+		t.Fatalf("newPrefetchReader range: %v", err)
+	}
+	got2, err := io.ReadAll(r2)
+	_ = r2.Close()
+	want := src[24:48]
+	if err != nil || !bytes.Equal(got2, want) {
+		t.Fatalf("clean range read: err=%v equal=%v", err, bytes.Equal(got2, want))
+	}
+}
+
 func TestClampGetPrefetch(t *testing.T) {
 	cases := []struct {
 		in, want int

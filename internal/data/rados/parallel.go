@@ -93,6 +93,10 @@ func putChunksParallelWithChunkSize(ctx context.Context, r io.Reader, class stri
 				if err != nil {
 					return err
 				}
+				// US-009: stamp the per-chunk CRC32C centrally so every
+				// chunk-based backend records it uniformly (the read path
+				// verifies against it and fails loud on a byte-flip).
+				ref.Checksum = data.ComputeChunkCRC(j.body)
 				placeChunk(j.idx, ref)
 			}
 			return nil

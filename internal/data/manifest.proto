@@ -51,12 +51,16 @@ message PartRange {
   string checksum_algorithm = 6;
 }
 
+// ChunkRef field-number ledger: 1..5 cluster/pool/namespace/oid/size;
+// 6 crc32c (US-009 per-chunk CRC32C, Castagnoli, of the chunk's stored
+// bytes; 0 == absent for pre-US-009 rows, which skip verification).
 message ChunkRef {
   string cluster = 1;
   string pool = 2;
   string namespace = 3;
   string oid = 4;
   int64 size = 5;
+  uint32 crc32c = 6;
 }
 
 message PartChecksum {

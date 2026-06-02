@@ -53,6 +53,11 @@ type Config struct {
 	TrustedProxies string `koanf:"trusted_proxies"`
 
 	DefaultBucketShards int `koanf:"default_bucket_shards"`
+
+	// ChunkCRCVerify gates read-path per-chunk CRC32C verification
+	// (US-009). Default on; set STRATA_CHUNK_CRC_VERIFY=false to disable
+	// the at-rest corruption check (the explicit operator escape hatch).
+	ChunkCRCVerify bool `koanf:"chunk_crc_verify"`
 }
 
 // HTTPConfig carries per-connection timeout knobs applied to the gateway
@@ -539,6 +544,7 @@ func defaults() Config {
 		MetaBackend:         "memory",
 		ShutdownWait:        10 * time.Second,
 		DefaultBucketShards: 64,
+		ChunkCRCVerify:      true,
 		HTTP: HTTPConfig{
 			ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout:       60 * time.Second,
@@ -686,6 +692,7 @@ var envMap = map[string]string{
 	"STRATA_DATA_BACKEND":                    "data_backend",
 	"STRATA_META_BACKEND":                    "meta_backend",
 	"STRATA_BUCKET_SHARDS":                   "default_bucket_shards",
+	"STRATA_CHUNK_CRC_VERIFY":                "chunk_crc_verify",
 	"STRATA_SHUTDOWN_WAIT":                   "shutdown_wait",
 	"STRATA_HTTP_READ_HEADER_TIMEOUT":        "http.read_header_timeout",
 	"STRATA_HTTP_READ_TIMEOUT":               "http.read_timeout",

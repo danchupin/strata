@@ -40,6 +40,7 @@ for the dispatch shape.
 | `STRATA_DATA_BACKEND` | `memory` | `memory \| rados \| s3` | Data-backend selector. Required at boot. | `data_backend` |
 | `STRATA_META_BACKEND` | `memory` | `memory \| cassandra \| tikv` | Meta-backend selector. Required at boot. | `meta_backend` |
 | `STRATA_BUCKET_SHARDS` | `64` | positive int | Per-bucket default shard count for the `objects` table; see [sharded objects]({{< ref "/architecture/sharding" >}}). | `default_bucket_shards` |
+| `STRATA_CHUNK_CRC_VERIFY` | `true` | `true \| false` | Read-path per-chunk CRC32C verification (US-009). On: a byte-flip in a stored plaintext chunk fails the read loud (`ErrChecksumMismatch`) instead of a corrupted 200. Off: operator escape hatch. | `chunk_crc_verify` |
 | `STRATA_SHUTDOWN_WAIT` | `10s` | Go duration | Graceful-shutdown drain window before `http.Server.Close`. | `shutdown_wait` |
 | `STRATA_HTTP_READ_HEADER_TIMEOUT` | `10s` | Go duration ≥ 0 | Slowloris-safe ceiling on header receipt. `0` = disabled (net/http semantic). | `http.read_header_timeout` |
 | `STRATA_HTTP_READ_TIMEOUT` | `60s` | Go duration ≥ 0 | Header + body receipt ceiling. `0` = disabled. | `http.read_timeout` |

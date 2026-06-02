@@ -62,6 +62,9 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger, selected 
 	}
 	logger.Info("manifest encoder", "format", data.ManifestFormat())
 
+	data.SetChunkCRCVerify(cfg.ChunkCRCVerify)
+	logger.Info("chunk crc32c verify", "enabled", data.ChunkCRCVerifyEnabled())
+
 	tracerProvider, err := strataotel.InitWithSettings(ctx, strataotel.Settings{
 		Endpoint:     cfg.OTel.Endpoint,
 		SampleRatio:  cfg.OTel.SampleRatio,

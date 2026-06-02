@@ -540,3 +540,29 @@ func TestDefaultMiscKnobs(t *testing.T) {
 		t.Errorf("cassandra.slow_ms default = %d want 0 (consumer falls back)", cfg.Cassandra.SlowMS)
 	}
 }
+
+// TestChunkCRCVerifyDefaultAndOptOut pins US-009 config wiring: the read-path
+// CRC32C verify gate defaults on, and STRATA_CHUNK_CRC_VERIFY=false flips it
+// off (the operator escape hatch).
+func TestChunkCRCVerifyDefaultAndOptOut(t *testing.T) {
+	t.Run("default on", func(t *testing.T) {
+		clearEnv(t)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.ChunkCRCVerify {
+			t.Fatal("ChunkCRCVerify default: want true, got false")
+		}
+	})
+	t.Run("env opt-out", func(t *testing.T) {
+		t.Setenv("STRATA_CHUNK_CRC_VERIFY", "false")
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.ChunkCRCVerify {
+			t.Fatal("ChunkCRCVerify with env=false: want false, got true")
+		}
+	})
+}

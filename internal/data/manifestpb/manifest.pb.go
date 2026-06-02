@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v6.32.0
-// source: manifest.proto
+// source: internal/data/manifest.proto
 
 package manifestpb
 
@@ -55,7 +55,7 @@ type Manifest struct {
 
 func (x *Manifest) Reset() {
 	*x = Manifest{}
-	mi := &file_manifest_proto_msgTypes[0]
+	mi := &file_internal_data_manifest_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -67,7 +67,7 @@ func (x *Manifest) String() string {
 func (*Manifest) ProtoMessage() {}
 
 func (x *Manifest) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[0]
+	mi := &file_internal_data_manifest_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -80,7 +80,7 @@ func (x *Manifest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Manifest.ProtoReflect.Descriptor instead.
 func (*Manifest) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{0}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Manifest) GetClass() string {
@@ -173,7 +173,7 @@ type ECParams struct {
 
 func (x *ECParams) Reset() {
 	*x = ECParams{}
-	mi := &file_manifest_proto_msgTypes[1]
+	mi := &file_internal_data_manifest_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -185,7 +185,7 @@ func (x *ECParams) String() string {
 func (*ECParams) ProtoMessage() {}
 
 func (x *ECParams) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[1]
+	mi := &file_internal_data_manifest_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -198,7 +198,7 @@ func (x *ECParams) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ECParams.ProtoReflect.Descriptor instead.
 func (*ECParams) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{1}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ECParams) GetK() int32 {
@@ -229,7 +229,7 @@ type PartRange struct {
 
 func (x *PartRange) Reset() {
 	*x = PartRange{}
-	mi := &file_manifest_proto_msgTypes[2]
+	mi := &file_internal_data_manifest_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -241,7 +241,7 @@ func (x *PartRange) String() string {
 func (*PartRange) ProtoMessage() {}
 
 func (x *PartRange) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[2]
+	mi := &file_internal_data_manifest_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -254,7 +254,7 @@ func (x *PartRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartRange.ProtoReflect.Descriptor instead.
 func (*PartRange) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{2}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *PartRange) GetPartNumber() int32 {
@@ -299,6 +299,9 @@ func (x *PartRange) GetChecksumAlgorithm() string {
 	return ""
 }
 
+// ChunkRef field-number ledger: 1..5 cluster/pool/namespace/oid/size;
+// 6 crc32c (US-009 per-chunk CRC32C, Castagnoli, of the chunk's stored
+// bytes; 0 == absent for pre-US-009 rows, which skip verification).
 type ChunkRef struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Cluster       string                 `protobuf:"bytes,1,opt,name=cluster,proto3" json:"cluster,omitempty"`
@@ -306,13 +309,14 @@ type ChunkRef struct {
 	Namespace     string                 `protobuf:"bytes,3,opt,name=namespace,proto3" json:"namespace,omitempty"`
 	Oid           string                 `protobuf:"bytes,4,opt,name=oid,proto3" json:"oid,omitempty"`
 	Size          int64                  `protobuf:"varint,5,opt,name=size,proto3" json:"size,omitempty"`
+	Crc32C        uint32                 `protobuf:"varint,6,opt,name=crc32c,proto3" json:"crc32c,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ChunkRef) Reset() {
 	*x = ChunkRef{}
-	mi := &file_manifest_proto_msgTypes[3]
+	mi := &file_internal_data_manifest_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -324,7 +328,7 @@ func (x *ChunkRef) String() string {
 func (*ChunkRef) ProtoMessage() {}
 
 func (x *ChunkRef) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[3]
+	mi := &file_internal_data_manifest_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -337,7 +341,7 @@ func (x *ChunkRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ChunkRef.ProtoReflect.Descriptor instead.
 func (*ChunkRef) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{3}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ChunkRef) GetCluster() string {
@@ -375,6 +379,13 @@ func (x *ChunkRef) GetSize() int64 {
 	return 0
 }
 
+func (x *ChunkRef) GetCrc32C() uint32 {
+	if x != nil {
+		return x.Crc32C
+	}
+	return 0
+}
+
 type PartChecksum struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Values        map[string]string      `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -384,7 +395,7 @@ type PartChecksum struct {
 
 func (x *PartChecksum) Reset() {
 	*x = PartChecksum{}
-	mi := &file_manifest_proto_msgTypes[4]
+	mi := &file_internal_data_manifest_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -396,7 +407,7 @@ func (x *PartChecksum) String() string {
 func (*PartChecksum) ProtoMessage() {}
 
 func (x *PartChecksum) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[4]
+	mi := &file_internal_data_manifest_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -409,7 +420,7 @@ func (x *PartChecksum) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PartChecksum.ProtoReflect.Descriptor instead.
 func (*PartChecksum) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{4}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PartChecksum) GetValues() map[string]string {
@@ -438,7 +449,7 @@ type BackendRef struct {
 
 func (x *BackendRef) Reset() {
 	*x = BackendRef{}
-	mi := &file_manifest_proto_msgTypes[5]
+	mi := &file_internal_data_manifest_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -450,7 +461,7 @@ func (x *BackendRef) String() string {
 func (*BackendRef) ProtoMessage() {}
 
 func (x *BackendRef) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[5]
+	mi := &file_internal_data_manifest_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -463,7 +474,7 @@ func (x *BackendRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BackendRef.ProtoReflect.Descriptor instead.
 func (*BackendRef) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{5}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *BackendRef) GetBackend() string {
@@ -519,7 +530,7 @@ type SSEInfo struct {
 
 func (x *SSEInfo) Reset() {
 	*x = SSEInfo{}
-	mi := &file_manifest_proto_msgTypes[6]
+	mi := &file_internal_data_manifest_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -531,7 +542,7 @@ func (x *SSEInfo) String() string {
 func (*SSEInfo) ProtoMessage() {}
 
 func (x *SSEInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_manifest_proto_msgTypes[6]
+	mi := &file_internal_data_manifest_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -544,7 +555,7 @@ func (x *SSEInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SSEInfo.ProtoReflect.Descriptor instead.
 func (*SSEInfo) Descriptor() ([]byte, []int) {
-	return file_manifest_proto_rawDescGZIP(), []int{6}
+	return file_internal_data_manifest_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *SSEInfo) GetMode() string {
@@ -568,11 +579,11 @@ func (x *SSEInfo) GetKmsKeyId() string {
 	return ""
 }
 
-var File_manifest_proto protoreflect.FileDescriptor
+var File_internal_data_manifest_proto protoreflect.FileDescriptor
 
-const file_manifest_proto_rawDesc = "" +
+const file_internal_data_manifest_proto_rawDesc = "" +
 	"\n" +
-	"\x0emanifest.proto\x12\x0estrata.data.v1\"\xeb\x03\n" +
+	"\x1cinternal/data/manifest.proto\x12\x0estrata.data.v1\"\xeb\x03\n" +
 	"\bManifest\x12\x14\n" +
 	"\x05class\x18\x01 \x01(\tR\x05class\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x03R\x04size\x12\x1d\n" +
@@ -598,13 +609,14 @@ const file_manifest_proto_rawDesc = "" +
 	"\x04size\x18\x03 \x01(\x03R\x04size\x12\x12\n" +
 	"\x04etag\x18\x04 \x01(\tR\x04etag\x12%\n" +
 	"\x0echecksum_value\x18\x05 \x01(\tR\rchecksumValue\x12-\n" +
-	"\x12checksum_algorithm\x18\x06 \x01(\tR\x11checksumAlgorithm\"|\n" +
+	"\x12checksum_algorithm\x18\x06 \x01(\tR\x11checksumAlgorithm\"\x94\x01\n" +
 	"\bChunkRef\x12\x18\n" +
 	"\acluster\x18\x01 \x01(\tR\acluster\x12\x12\n" +
 	"\x04pool\x18\x02 \x01(\tR\x04pool\x12\x1c\n" +
 	"\tnamespace\x18\x03 \x01(\tR\tnamespace\x12\x10\n" +
 	"\x03oid\x18\x04 \x01(\tR\x03oid\x12\x12\n" +
-	"\x04size\x18\x05 \x01(\x03R\x04size\"\x8b\x01\n" +
+	"\x04size\x18\x05 \x01(\x03R\x04size\x12\x16\n" +
+	"\x06crc32c\x18\x06 \x01(\rR\x06crc32c\"\x8b\x01\n" +
 	"\fPartChecksum\x12@\n" +
 	"\x06values\x18\x01 \x03(\v2(.strata.data.v1.PartChecksum.ValuesEntryR\x06values\x1a9\n" +
 	"\vValuesEntry\x12\x10\n" +
@@ -626,19 +638,19 @@ const file_manifest_proto_rawDesc = "" +
 	"kms_key_id\x18\x03 \x01(\tR\bkmsKeyIdBAZ?github.com/danchupin/strata/internal/data/manifestpb;manifestpbb\x06proto3"
 
 var (
-	file_manifest_proto_rawDescOnce sync.Once
-	file_manifest_proto_rawDescData []byte
+	file_internal_data_manifest_proto_rawDescOnce sync.Once
+	file_internal_data_manifest_proto_rawDescData []byte
 )
 
-func file_manifest_proto_rawDescGZIP() []byte {
-	file_manifest_proto_rawDescOnce.Do(func() {
-		file_manifest_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_manifest_proto_rawDesc), len(file_manifest_proto_rawDesc)))
+func file_internal_data_manifest_proto_rawDescGZIP() []byte {
+	file_internal_data_manifest_proto_rawDescOnce.Do(func() {
+		file_internal_data_manifest_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_internal_data_manifest_proto_rawDesc), len(file_internal_data_manifest_proto_rawDesc)))
 	})
-	return file_manifest_proto_rawDescData
+	return file_internal_data_manifest_proto_rawDescData
 }
 
-var file_manifest_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
-var file_manifest_proto_goTypes = []any{
+var file_internal_data_manifest_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_internal_data_manifest_proto_goTypes = []any{
 	(*Manifest)(nil),     // 0: strata.data.v1.Manifest
 	(*ECParams)(nil),     // 1: strata.data.v1.ECParams
 	(*PartRange)(nil),    // 2: strata.data.v1.PartRange
@@ -648,7 +660,7 @@ var file_manifest_proto_goTypes = []any{
 	(*SSEInfo)(nil),      // 6: strata.data.v1.SSEInfo
 	nil,                  // 7: strata.data.v1.PartChecksum.ValuesEntry
 }
-var file_manifest_proto_depIdxs = []int32{
+var file_internal_data_manifest_proto_depIdxs = []int32{
 	3, // 0: strata.data.v1.Manifest.chunks:type_name -> strata.data.v1.ChunkRef
 	4, // 1: strata.data.v1.Manifest.part_checksums:type_name -> strata.data.v1.PartChecksum
 	5, // 2: strata.data.v1.Manifest.backend_ref:type_name -> strata.data.v1.BackendRef
@@ -663,26 +675,26 @@ var file_manifest_proto_depIdxs = []int32{
 	0, // [0:7] is the sub-list for field type_name
 }
 
-func init() { file_manifest_proto_init() }
-func file_manifest_proto_init() {
-	if File_manifest_proto != nil {
+func init() { file_internal_data_manifest_proto_init() }
+func file_internal_data_manifest_proto_init() {
+	if File_internal_data_manifest_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_manifest_proto_rawDesc), len(file_manifest_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_internal_data_manifest_proto_rawDesc), len(file_internal_data_manifest_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_manifest_proto_goTypes,
-		DependencyIndexes: file_manifest_proto_depIdxs,
-		MessageInfos:      file_manifest_proto_msgTypes,
+		GoTypes:           file_internal_data_manifest_proto_goTypes,
+		DependencyIndexes: file_internal_data_manifest_proto_depIdxs,
+		MessageInfos:      file_internal_data_manifest_proto_msgTypes,
 	}.Build()
-	File_manifest_proto = out.File
-	file_manifest_proto_goTypes = nil
-	file_manifest_proto_depIdxs = nil
+	File_internal_data_manifest_proto = out.File
+	file_internal_data_manifest_proto_goTypes = nil
+	file_internal_data_manifest_proto_depIdxs = nil
 }
