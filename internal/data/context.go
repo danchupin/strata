@@ -195,6 +195,43 @@ func PlacementModeFromContext(ctx context.Context) (string, bool) {
 	return v, true
 }
 
+// backrefKey carries the object-level back-reference identity
+// (BackrefAttrs) onto the data-plane ctx so PutChunks can stamp the
+// self-describing owner pointer on each chunk without widening the
+// Backend interface (US-001 metadata-data-reconcile). The handler decides
+// version_id + mtime BEFORE PutChunks (and pre-sets them on the meta
+// Object so the two tiers agree) precisely so the chunk back-reference can
+// carry the same version_id the meta store records — that match is what
+// the reconcile worker (US-002) relies on to pair a chunk with its
+// manifest.
+type backrefKey struct{}
+
+// WithBackref stores the object-level back-reference attrs on ctx. An
+// all-zero identity (no bucket id AND no key) returns ctx unchanged so
+// callers that cannot supply an identity (e.g. a multipart part whose
+// final object version_id is not yet known) leave the chunk un-stamped —
+// the backend then skips the xattr and reconcile degrades gracefully.
+func WithBackref(ctx context.Context, a BackrefAttrs) context.Context {
+	if a.BucketID == uuid.Nil && a.Key == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, backrefKey{}, a)
+}
+
+// BackrefFromContext returns the attrs stored via WithBackref. The second
+// return is false when the request carries no identity — backends then
+// write the chunk with no back-reference xattr (legacy behaviour).
+func BackrefFromContext(ctx context.Context) (BackrefAttrs, bool) {
+	if ctx == nil {
+		return BackrefAttrs{}, false
+	}
+	v, ok := ctx.Value(backrefKey{}).(BackrefAttrs)
+	if !ok {
+		return BackrefAttrs{}, false
+	}
+	return v, true
+}
+
 // ecPolicyKey carries the bucket's ECPolicy (K + M) onto the data-plane
 // ctx so PutChunks can stamp Manifest.ECParams without widening the
 // Backend interface (US-007 EC-aware manifest schema).

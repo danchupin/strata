@@ -635,6 +635,16 @@ Non-goals:
 
 ## Known latent bugs
 
+- **P2 — Multipart-origin chunks carry no back-reference (US-001 split).** The chunk back-reference
+  (`user.strata.backref` xattr / `x-amz-meta-strata-backref`) is stamped on the single-object PUT and
+  CopyObject paths, where the object's `version_id` + `mtime` can be decided BEFORE `PutChunks` and threaded
+  via `data.WithBackref`. Multipart part chunks are written at UploadPart / UploadPartCopy time, when the final
+  object's `version_id` is not yet known (it is minted at CompleteMultipartUpload) — so those chunks land with
+  NO back-reference rather than a wrong one. Reconcile (US-002/003) + rebuild (US-004) therefore can't recover a
+  multipart object from data alone yet; they degrade gracefully (an absent back-reference is logged, not
+  fatal). Closing it needs either a re-stamp pass at Complete (extra round-trip per part chunk — defeats the
+  "same WriteOp" cost goal) or carrying the upload identity in the part xattr and rewriting the version on
+  Complete. Tracked as the trailing `US-001b` story in `scripts/ralph/prd.json`. (`ralph/metadata-data-reconcile` US-001)
 - **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
   reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
   the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but

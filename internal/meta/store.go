@@ -40,98 +40,98 @@ func ResolveVersionID(v string) string {
 }
 
 var (
-	ErrBucketNotFound        = errors.New("bucket not found")
-	ErrBucketAlreadyExists   = errors.New("bucket already exists")
-	ErrBucketNotEmpty        = errors.New("bucket not empty")
-	ErrObjectNotFound        = errors.New("object not found")
-	ErrObjectLocked          = errors.New("object is protected by retention or legal hold")
-	ErrMultipartNotFound     = errors.New("multipart upload not found")
-	ErrMultipartInProgress   = errors.New("multipart upload is already completing or aborted")
-	ErrMultipartPartMissing  = errors.New("multipart part not found")
-	ErrMultipartETagMismatch = errors.New("multipart part etag mismatch")
-	ErrNoSuchLifecycle       = errors.New("no lifecycle configuration for bucket")
-	ErrNoSuchCORS            = errors.New("no cors configuration for bucket")
-	ErrNoSuchBucketPolicy    = errors.New("no policy configured for bucket")
-	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
-	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
-	ErrNoSuchEncryption        = errors.New("no encryption configuration for bucket")
-	ErrNoSuchObjectLockConfig  = errors.New("no object lock configuration for bucket")
-	ErrNoSuchNotification      = errors.New("no notification configuration for bucket")
-	ErrNoSuchWebsite           = errors.New("no website configuration for bucket")
-	ErrNoSuchReplication       = errors.New("no replication configuration for bucket")
-	ErrNoSuchLogging           = errors.New("no logging configuration for bucket")
-	ErrNoSuchTagSet            = errors.New("no tag set configured for bucket")
-	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
-	ErrNoSuchInventoryConfig   = errors.New("no inventory configuration with that id")
-	ErrAccessPointAlreadyExists = errors.New("access point with that name already exists")
-	ErrAccessPointNotFound      = errors.New("access point not found")
-	ErrReshardInProgress       = errors.New("a reshard is already in progress for this bucket")
-	ErrReshardNotFound         = errors.New("no reshard job for this bucket")
-	ErrReshardInvalidTarget    = errors.New("reshard target must be a positive power of two greater than the current shard count")
-	ErrIAMUserNotFound         = errors.New("iam user not found")
-	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
-	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
-	ErrManagedPolicyNotFound      = errors.New("managed policy not found")
-	ErrManagedPolicyAlreadyExists = errors.New("managed policy already exists")
-	ErrPolicyAttached             = errors.New("managed policy is attached to one or more users")
-	ErrUserPolicyNotAttached      = errors.New("managed policy is not attached to user")
-	ErrUserPolicyAlreadyAttached  = errors.New("managed policy is already attached to user")
+	ErrBucketNotFound              = errors.New("bucket not found")
+	ErrBucketAlreadyExists         = errors.New("bucket already exists")
+	ErrBucketNotEmpty              = errors.New("bucket not empty")
+	ErrObjectNotFound              = errors.New("object not found")
+	ErrObjectLocked                = errors.New("object is protected by retention or legal hold")
+	ErrMultipartNotFound           = errors.New("multipart upload not found")
+	ErrMultipartInProgress         = errors.New("multipart upload is already completing or aborted")
+	ErrMultipartPartMissing        = errors.New("multipart part not found")
+	ErrMultipartETagMismatch       = errors.New("multipart part etag mismatch")
+	ErrNoSuchLifecycle             = errors.New("no lifecycle configuration for bucket")
+	ErrNoSuchCORS                  = errors.New("no cors configuration for bucket")
+	ErrNoSuchBucketPolicy          = errors.New("no policy configured for bucket")
+	ErrNoSuchPublicAccessBlock     = errors.New("no public access block configuration for bucket")
+	ErrNoSuchOwnershipControls     = errors.New("no ownership controls configured for bucket")
+	ErrNoSuchEncryption            = errors.New("no encryption configuration for bucket")
+	ErrNoSuchObjectLockConfig      = errors.New("no object lock configuration for bucket")
+	ErrNoSuchNotification          = errors.New("no notification configuration for bucket")
+	ErrNoSuchWebsite               = errors.New("no website configuration for bucket")
+	ErrNoSuchReplication           = errors.New("no replication configuration for bucket")
+	ErrNoSuchLogging               = errors.New("no logging configuration for bucket")
+	ErrNoSuchTagSet                = errors.New("no tag set configured for bucket")
+	ErrNoSuchGrants                = errors.New("no acl grants persisted for resource")
+	ErrNoSuchInventoryConfig       = errors.New("no inventory configuration with that id")
+	ErrAccessPointAlreadyExists    = errors.New("access point with that name already exists")
+	ErrAccessPointNotFound         = errors.New("access point not found")
+	ErrReshardInProgress           = errors.New("a reshard is already in progress for this bucket")
+	ErrReshardNotFound             = errors.New("no reshard job for this bucket")
+	ErrReshardInvalidTarget        = errors.New("reshard target must be a positive power of two greater than the current shard count")
+	ErrIAMUserNotFound             = errors.New("iam user not found")
+	ErrIAMUserAlreadyExists        = errors.New("iam user already exists")
+	ErrIAMAccessKeyNotFound        = errors.New("iam access key not found")
+	ErrManagedPolicyNotFound       = errors.New("managed policy not found")
+	ErrManagedPolicyAlreadyExists  = errors.New("managed policy already exists")
+	ErrPolicyAttached              = errors.New("managed policy is attached to one or more users")
+	ErrUserPolicyNotAttached       = errors.New("managed policy is not attached to user")
+	ErrUserPolicyAlreadyAttached   = errors.New("managed policy is already attached to user")
 	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
-	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
-	ErrAdminJobNotFound        = errors.New("admin job not found")
-	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+	ErrNoRewrapProgress            = errors.New("no rewrap progress recorded for bucket")
+	ErrAdminJobNotFound            = errors.New("admin job not found")
+	ErrAdminJobAlreadyExists       = errors.New("admin job already exists")
 	// ErrQuotaExceeded signals that a write would exceed a configured
 	// per-bucket or per-user quota (US-006). Surfaced from the gateway as
 	// HTTP 403 / S3 code "QuotaExceeded" — non-AWS but matches the RGW shape
 	// so existing tooling that already understands the code keeps working.
 	// Returned today only by gateway-level enforcement helpers; backend
 	// stores never raise it directly.
-	ErrQuotaExceeded           = errors.New("quota exceeded")
+	ErrQuotaExceeded = errors.New("quota exceeded")
 	// ErrInvalidPlacement signals a bucket Placement policy that fails
 	// structural validation: weight outside [0, 100], sum(weights) == 0, or
 	// an empty cluster name (US-001 placement-rebalance cycle).
-	ErrInvalidPlacement        = errors.New("invalid placement policy")
+	ErrInvalidPlacement = errors.New("invalid placement policy")
 	// ErrUnknownCluster signals a Placement entry references a cluster id
 	// that is not in the configured STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS
 	// set. The meta.Store itself never raises this — cluster name resolution
 	// happens in the admin handler. Defined here so all placement-related
 	// sentinels live in one place (US-001).
-	ErrUnknownCluster          = errors.New("unknown cluster id")
+	ErrUnknownCluster = errors.New("unknown cluster id")
 	// ErrInvalidClusterState signals a SetClusterState call with a value
 	// outside the allowed set ({"live", "draining_readonly", "evacuating",
 	// "removed"}) or with an (state, mode) combination that violates the
 	// 4-state machine (US-001 drain-transparency).
-	ErrInvalidClusterState     = errors.New("invalid cluster state")
+	ErrInvalidClusterState = errors.New("invalid cluster state")
 	// ErrInvalidClusterMode signals a SetClusterState call with a mode
 	// value outside {"", "readonly", "evacuate"}.
-	ErrInvalidClusterMode      = errors.New("invalid cluster mode")
+	ErrInvalidClusterMode = errors.New("invalid cluster mode")
 	// ErrInvalidClusterWeight signals a SetClusterState call with a
 	// weight outside [0, 100] (US-001 cluster-weights).
-	ErrInvalidClusterWeight    = errors.New("invalid cluster weight")
+	ErrInvalidClusterWeight = errors.New("invalid cluster weight")
 	// ErrInvalidPlacementMode signals a SetBucketPlacementMode call with
 	// a value outside {"", "weighted", "strict"} (US-001 effective-
 	// placement). Empty string is legal and means "default weighted".
-	ErrInvalidPlacementMode    = errors.New("invalid placement mode")
+	ErrInvalidPlacementMode = errors.New("invalid placement mode")
 	// ErrInvalidShard signals a ListBucketsShard call with shardID
 	// outside [0, totalShards) or totalShards < 1 (US-001 rebalance-
 	// scale-phase-2).
-	ErrInvalidShard            = errors.New("invalid shard id or count")
+	ErrInvalidShard = errors.New("invalid shard id or count")
 	// ErrInvalidECPolicy signals a SetBucketECPolicy call with non-
 	// positive K or M (US-007 EC-aware manifests).
-	ErrInvalidECPolicy         = errors.New("invalid EC policy")
+	ErrInvalidECPolicy = errors.New("invalid EC policy")
 	// ErrNoSuchECPolicy signals GetBucketECPolicy / DeleteBucketECPolicy
 	// against a bucket with no stored EC policy.
-	ErrNoSuchECPolicy          = errors.New("no EC policy configured")
+	ErrNoSuchECPolicy = errors.New("no EC policy configured")
 	// ErrInconsistentECPolicy signals that the requested (k, m) does
 	// not match the underlying cluster's erasure-code capability
 	// (US-007). Surfaced as HTTP 409 by the admin handler.
-	ErrInconsistentECPolicy    = errors.New("inconsistent EC policy")
+	ErrInconsistentECPolicy = errors.New("inconsistent EC policy")
 	// ErrBucketSigningKeyNotSet signals GetBucketSigningKey against a
 	// bucket that has no per-bucket signing key persisted (US-001
 	// auth-dx-trailer-lima). Callers must treat this as "not set" and
 	// fall through to the IAM access-key SigV4 path — per-bucket signing
 	// keys are OPT-IN per bucket.
-	ErrBucketSigningKeyNotSet  = errors.New("no per-bucket signing key set")
+	ErrBucketSigningKeyNotSet = errors.New("no per-bucket signing key set")
 )
 
 const (
@@ -146,7 +146,7 @@ const (
 	// semantics: when its Placement policy references only draining
 	// clusters, PUTs return 503 DrainRefused (no fallback) and drain
 	// workflows refuse to fire until the operator edits the policy.
-	PlacementModeStrict   = "strict"
+	PlacementModeStrict = "strict"
 )
 
 // ValidatePlacementMode enforces the legal set of placement-mode
@@ -548,9 +548,9 @@ type Bucket struct {
 	// unwrap), SigningKeyCreatedAt is the wall-clock time the operator
 	// rotated. Absence (zero values) means the bucket has no per-bucket
 	// signing key and SigV4 falls through to the IAM access-key path.
-	SigningWrappedDEK    []byte    `json:"signing_wrapped_dek,omitempty"`
-	SigningKeyID         string    `json:"signing_key_id,omitempty"`
-	SigningKeyCreatedAt  time.Time `json:"signing_key_created_at,omitempty"`
+	SigningWrappedDEK   []byte    `json:"signing_wrapped_dek,omitempty"`
+	SigningKeyID        string    `json:"signing_key_id,omitempty"`
+	SigningKeyCreatedAt time.Time `json:"signing_key_created_at,omitempty"`
 }
 
 // ECPolicy mirrors data.ECParams at the bucket-declaration layer. K data
@@ -577,33 +577,33 @@ type Object struct {
 	// PutObject takes the Suspended-null path that replaces just the prior
 	// null row instead of all rows). Paired with VersionID = NullVersionID.
 	// GET ?versionId=null resolves to the row with this flag.
-	IsNull         bool
-	Size           int64
-	ETag           string
-	ContentType    string
-	StorageClass   string
-	Mtime          time.Time
-	Manifest       *data.Manifest
-	UserMeta       map[string]string
-	Tags           map[string]string
-	RetainUntil    time.Time
-	RetainMode     string
-	LegalHold      bool
-	Checksums      map[string]string
-	SSE            string
-	SSECKeyMD5     string
-	SSEKey         []byte
-	SSEKeyID       string
-	RestoreStatus  string
-	PartsCount     int
+	IsNull        bool
+	Size          int64
+	ETag          string
+	ContentType   string
+	StorageClass  string
+	Mtime         time.Time
+	Manifest      *data.Manifest
+	UserMeta      map[string]string
+	Tags          map[string]string
+	RetainUntil   time.Time
+	RetainMode    string
+	LegalHold     bool
+	Checksums     map[string]string
+	SSE           string
+	SSECKeyMD5    string
+	SSEKey        []byte
+	SSEKeyID      string
+	RestoreStatus string
+	PartsCount    int
 	// PartSizes holds the plaintext byte size of each multipart part in
 	// PartNumber order. Empty for single-PUT objects. Populated by
 	// CompleteMultipartUpload so GET /<key>?partNumber=N can serve only
 	// part N's bytes without revisiting multipart_parts (which is deleted
 	// after Complete). Cassandra column: objects.part_sizes list<bigint>.
-	PartSizes      []int64
-	CacheControl   string
-	Expires        string
+	PartSizes         []int64
+	CacheControl      string
+	Expires           string
 	ReplicationStatus string
 	// ChecksumType is the AWS-defined object-checksum aggregation type:
 	// "COMPOSITE" for multipart objects whose composite checksum is
@@ -630,11 +630,11 @@ type ListResult struct {
 }
 
 type ListVersionsResult struct {
-	Versions         []*Object
-	CommonPrefixes   []string
-	NextKeyMarker    string
-	NextVersionID    string
-	Truncated        bool
+	Versions       []*Object
+	CommonPrefixes []string
+	NextKeyMarker  string
+	NextVersionID  string
+	Truncated      bool
 }
 
 type MultipartUpload struct {
@@ -1445,6 +1445,18 @@ type ReshardMigrator interface {
 
 func IsVersioningActive(state string) bool {
 	return state == VersioningEnabled || state == VersioningSuspended
+}
+
+// NewVersionID mints a fresh v1 (time-based) UUID string for an object
+// version, matching the shape both backends mint internally (gocql.TimeUUID
+// / google-uuid v1 are wire-identical for the objects.version_id timeuuid
+// column). Callers that must decide the version id BEFORE the data backend
+// writes — so a chunk back-reference can carry the SAME version_id the meta
+// store will record (US-001 metadata-data-reconcile) — call this and
+// pre-set Object.VersionID; PutObject then honours the pre-set value
+// instead of minting its own.
+func NewVersionID() string {
+	return uuid.Must(uuid.NewUUID()).String()
 }
 
 // IsValidShardCount reports whether n is acceptable as a bucket shard count.

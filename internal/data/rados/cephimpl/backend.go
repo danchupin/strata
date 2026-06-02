@@ -49,6 +49,15 @@ type Backend struct {
 	// WriteOp / ReadOp batched helpers in ops.go.
 	batchOps bool
 
+	// backref stamps a self-describing owner pointer (data.BackrefXattrName)
+	// on each chunk in the SAME WriteOp as the body (US-001
+	// metadata-data-reconcile). Read once at New from
+	// STRATA_CHUNK_BACKREF (default on). When on, PutChunks routes through
+	// writeChunkBatched regardless of batchOps so the xattr rides one
+	// Operate; when off (or the ctx carries no identity) the legacy
+	// no-xattr path is byte-identical.
+	backref bool
+
 	// poolSize is the conn-pool depth per cluster. Read once at New from
 	// STRATA_RADOS_POOL_SIZE (default 1 = legacy single-conn, clamped to
 	// [1, MaxPoolSize]).
@@ -109,6 +118,7 @@ func New(cfg rados.Config) (data.Backend, error) {
 		putConcurrency: putConc,
 		getPrefetch:    getPre,
 		batchOps:       batchOps,
+		backref:        data.BackrefEnabledFromEnv(),
 		poolSize:       poolSize,
 		pools:          make(map[string]*connPool),
 	}, nil
@@ -251,10 +261,27 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		}
 		oid := fmt.Sprintf("%s.%05d", objID, idx)
 		start := time.Now()
+		var xattrs map[string]string
+		if b.backref {
+			if a, ok := data.BackrefFromContext(opCtx); ok {
+				enc := data.EncodeBackref(data.Backref{
+					BucketID:  a.BucketID,
+					Key:       a.Key,
+					VersionID: a.VersionID,
+					ChunkIdx:  idx,
+					Mtime:     a.Mtime,
+				})
+				xattrs = map[string]string{data.BackrefXattrName: string(enc)}
+			}
+		}
 		var werr error
-		if b.batchOps {
+		switch {
+		case xattrs != nil:
+			// Stamp the back-reference in the SAME WriteOp as the body.
+			werr = writeChunkBatched(ioctx, oid, body, xattrs)
+		case b.batchOps:
 			werr = writeChunkBatched(ioctx, oid, body, nil)
-		} else {
+		default:
 			werr = writeChunk(ioctx, oid, body)
 		}
 		rados.ObserveOp(opCtx, b.logger, b.metrics, b.tracer, spec.Pool, "put", oid, start, werr)

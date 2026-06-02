@@ -17,6 +17,16 @@ Cycle: ralph/metadata-data-reconcile
   cephimpl integration legs are CI-only (`make test-rados`). CI (Linux) = truth.
 - Chunk OID format is `fmt.Sprintf("%s.%05d", uuid.NewString(), idx)` →
   `<uuid>.<>=5 digits>`. `rados.ParseChunkOID`/`IsChunkOID` is the inverse filter.
+- Per-PUT data-tier dimensions ride the data-plane ctx, NEVER the
+  `data.Backend.PutChunks(ctx, io.Reader, class)` signature (carries no
+  bucket/key/version/mtime). Add a `With*/...FromContext` pair in
+  `internal/data/context.go`, read it in the backend `PutChunks`; the gateway
+  stamps the ctx via the `dataCtxForPut*` helpers.
+- To make a chunk and its meta row agree on `version_id`, the HANDLER must
+  pre-decide it (`meta.NewVersionID()`, only for `VersioningEnabled`;
+  Disabled/Suspended → `meta.NullVersionID`) and pre-set `Object.VersionID` +
+  `Object.Mtime` BEFORE PutChunks — both backends honour a pre-set non-empty
+  VersionID. Otherwise version_id is minted by PutObject AFTER PutChunks.
 
 ## 2026-06-02 - US-000 RADOS pool object-enumeration primitive
 - Implemented the foundation primitive for reconcile/rebuild: walk every object
@@ -58,4 +68,81 @@ Cycle: ralph/metadata-data-reconcile
   - go mod tidy can't run standalone here (cmd/strata/admin imports cephimpl, only
     resolvable via go.work). Don't run `GOWORK=off go mod tidy` — it errors. x/time
     is already a direct require (go.mod:40), used by internal/rebalance/throttle.go.
+---
+
+## 2026-06-02 - US-001 Chunk back-reference stamped at PUT (RADOS + S3 backend)
+- Made every single-PUT / CopyObject chunk self-describing: a key-material-free
+  back-reference {schema_byte, bucket_id, key, version_id, chunk_idx, mtime}
+  stamped at write time so reconcile (US-002/003) + rebuild (US-004) can run
+  from data alone.
+- Files added:
+  - internal/data/backref.go (always-on, CGO-free): data.Backref + BackrefAttrs
+    structs, EncodeBackref/DecodeBackref (compact versioned wire form:
+    schema(1)|bucketID(16)|mtimeUnixNano(8 BE)|chunkIdx(4 BE)|verLen(2 BE)|ver|key),
+    BackrefXattrName=user.strata.backref, BackrefMetaKey=strata-backref,
+    BackrefSchemaV1, ErrBackrefMalformed/ErrBackrefSchema, BackrefEnabledFromEnv
+    (STRATA_CHUNK_BACKREF default ON).
+  - internal/data/backref_test.go: table round-trip (null ver / empty key /
+    empty ver / large idx / unicode+embedded-null key / zero mtime), malformed +
+    schema-mismatch rejection, env-flag table, ctx round-trip + empty-identity
+    no-op, BenchmarkEncodeBackref (38ns, 1 alloc).
+  - internal/data/rados/cephimpl/backref_integration_test.go (in-package, build
+    tag integration): PutChunks w/ backref ctx -> read user.strata.backref off
+    each chunk OID via unexported b.ioctx -> DecodeBackref asserts exact fields +
+    chunk_idx increments. CI-only (ceph).
+- Files changed:
+  - internal/data/context.go: backrefKey + WithBackref/BackrefFromContext
+    (empty identity = ctx unchanged so un-stampable callers degrade gracefully).
+  - internal/meta/store.go: meta.NewVersionID() (uuid v1) so the handler can
+    pre-decide version_id BEFORE PutChunks.
+  - internal/s3api/server.go (putObject) + copy_object.go (copyObject):
+    pre-decide putMtime + versionID (only Enabled mints; Disabled/Suspended ->
+    NullVersionID, matching PutObject), thread data.WithBackref onto the put ctx,
+    pre-set obj.VersionID + obj.Mtime so meta + data agree on version_id.
+  - internal/data/rados/cephimpl/backend.go: backref bool field (New reads
+    data.BackrefEnabledFromEnv()); putOne builds the xattr from
+    BackrefFromContext + idx and routes through writeChunkBatched (one WriteOp,
+    no extra RTT) whenever a backref is present, regardless of batchOps.
+  - internal/data/s3/backend.go: backref field + New; PutChunks stamps
+    x-amz-meta-strata-backref (base64) as PutObjectInput.Metadata (ChunkIdx 0,
+    one backing object per PUT).
+  - internal/data/s3/backend_test.go: TestPutChunksStampsBackref (decodes the
+    captured header) + TestPutChunksNoBackrefWhenCtxAbsent.
+  - internal/data/memory/backend.go: documented no-op.
+  - docs/.../benchmarks/rados-ops.md: backref-xattr cost section + table
+    (one SetXattr rides the existing WriteOp -> within bare-WriteFull p99 noise).
+  - ROADMAP.md: P2 "Known latent bugs" entry for the multipart split.
+  - CLAUDE.md: backref pattern in the RADOS/cephimpl section.
+  - scripts/ralph/prd.json: US-001 passes:true + NEW trailing US-001b (multipart).
+- SPLIT recorded: multipart-origin chunks (UploadPart/UploadPartCopy) are written
+  BEFORE the final object version_id is minted (at CompleteMultipartUpload), so
+  the "same-WriteOp" backref can't carry the correct version_id there. Deferred
+  to US-001b (priority 9, passes:false). Absent backref degrades gracefully.
+- Quality: gofmt clean; CGO_ENABLED=0 GOWORK=off go test ./internal/data/
+  ./internal/data/s3/ ./internal/data/memory/ ./internal/meta/ ./internal/s3api/
+  all OK; go vet clean on those; hermetic go-ceph count = 0. cephimpl xattr
+  read-back leg + Cassandra version_id-parity verified on CI only (local macOS
+  blocks cgo/librados + gosigar-darwin).
+- **Learnings for future iterations:**
+  - PutChunks signature is (ctx, io.Reader, class) — NO bucket/key/version/mtime.
+    Per-object identity rides the data-plane ctx (data.With* in context.go). To
+    add a new per-PUT data-tier dimension, add a With/From pair there and stamp
+    in the backend; do NOT widen the data.Backend interface.
+  - version_id + mtime are NOT known inside PutChunks: version_id is minted by
+    PutObject AFTER PutChunks, mtime was time.Now() set after. To make the chunk
+    and the meta row agree, the HANDLER must pre-decide both and pre-set them on
+    meta.Object — PutObject honours a pre-set non-empty VersionID (both backends:
+    memory store.go:963 `else if o.VersionID == ""`, cassandra store.go:720
+    `if o.VersionID != ""`). Disabled/Suspended always collapse to NullVersionID
+    (Suspended via IsNull), so only Enabled mints — that's the exact handler rule.
+  - meta.IsVersioningActive is TRUE for Suspended (not just Enabled) — but
+    Suspended objects still get NullVersionID via obj.IsNull. Don't gate minting
+    on IsVersioningActive; gate on `== VersioningEnabled`.
+  - writeChunkBatched (cephimpl/ops.go) already existed (US-003 storage-correctness)
+    as the WriteFull+SetXattr seam, but was only wired behind STRATA_RADOS_BATCH_OPS
+    (default off, zero callers passed xattrs). US-001 is its first real xattr writer.
+  - cephimpl integration tests that need to inspect xattrs go IN-PACKAGE
+    (package cephimpl, build tag integration) so they can reach the unexported
+    b.ioctx seam; go-ceph ioctx.GetXattr(oid, name, buf []byte) (int, error)
+    reads into a caller buffer.
 ---

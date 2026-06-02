@@ -36,8 +36,25 @@
         "Tests pass"
       ],
       "priority": 2,
+      "passes": true,
+      "notes": "Core back-reference shipped: data.Backref payload + EncodeBackref/DecodeBackref (versioned, no key material, mtime required) in internal/data/backref.go; ctx plumbing data.WithBackref/BackrefFromContext; STRATA_CHUNK_BACKREF env opt-out (default on, data.BackrefEnabledFromEnv); meta.NewVersionID() v1 minter; handler (putObject + copyObject) pre-decides version_id+mtime and pre-sets on ctx AND meta.Object so tiers agree; RADOS PutChunks stamps user.strata.backref in same WriteOp (cephimpl); S3-passthrough stamps x-amz-meta-strata-backref; memory no-ops. Multipart-origin chunks SPLIT to trailing US-001b (final version_id unknown at UploadPart). Bench negligible (38ns encode; one SetXattr rides existing WriteOp). cephimpl xattr read-back proof is CI-only (integration tag)."
+    },
+    {
+      "id": "US-001b",
+      "title": "Chunk back-reference for multipart-origin chunks (trailing split)",
+      "description": "As the system, I want multipart part chunks to carry the same back-reference as single-PUT chunks so a reconcile/rebuild can recover multipart objects from data alone. SPLIT from US-001 because part chunks are written at UploadPart/UploadPartCopy time, before the final object version_id is minted (at CompleteMultipartUpload) — so they currently land with NO back-reference (graceful degrade). See ROADMAP 'Known latent bugs'.",
+      "acceptanceCriteria": [
+        "Multipart part chunks (UploadPart + UploadPartCopy) carry a back-reference recoverable to the final object {bucket_id, key, version_id, chunk_idx, mtime} after CompleteMultipartUpload",
+        "Approach decided + documented: either (a) stamp parts with the upload identity (uploadID) and rewrite version_id at Complete, or (b) a Complete-time re-stamp pass — whichever keeps the hot-path cost bounded; record the round-trip trade-off",
+        "version_id in the recovered back-reference matches the meta row the Complete writes (reconcile US-002 can pair the chunk with its manifest)",
+        "Red/green proof: multipart-upload an object, run rebuild-index against a wiped manifest -> object recovered with correct bytes + version order; matches the single-PUT path",
+        "make vet passes; RADOS leg under ceph/integration; S3-backend leg under the s3 backend test seam",
+        "ROADMAP 'Known latent bugs' entry closed in the same commit",
+        "Tests pass"
+      ],
+      "priority": 9,
       "passes": false,
-      "notes": ""
+      "notes": "Trailing split from US-001. Lower urgency than the reconcile/rebuild line (US-002..US-004 function on single-PUT objects); pick up after the core cycle."
     },
     {
       "id": "US-002",

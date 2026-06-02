@@ -3,12 +3,14 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -327,6 +329,68 @@ func TestPutChunksObjectKeyFallback(t *testing.T) {
 	}
 	if m.Class != "STANDARD" {
 		t.Fatalf("empty class default: want STANDARD, got %q", m.Class)
+	}
+}
+
+// TestPutChunksStampsBackref pins US-001: when the ctx carries a
+// back-reference identity, the S3-passthrough backend stamps it as
+// x-amz-meta-strata-backref user-metadata (base64 of the same payload the
+// RADOS backend writes as an xattr) so the object is self-describing for a
+// data-only reconcile / rebuild.
+func TestPutChunksStampsBackref(t *testing.T) {
+	captured := &headerCapturingTransport{}
+	b := openTestBackend(t, captured)
+
+	bid := uuid.New()
+	verID := uuid.New().String()
+	mtime := time.Unix(1717000000, 0).UTC()
+	ctx := data.WithBackref(context.Background(), data.BackrefAttrs{
+		BucketID:  bid,
+		Key:       "path/to/obj",
+		VersionID: verID,
+		Mtime:     mtime,
+	})
+
+	if _, err := b.PutChunks(ctx, strings.NewReader("hello"), "STANDARD"); err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	// SDK sends user-metadata as x-amz-meta-<key>.
+	raw := captured.lastHeader("X-Amz-Meta-" + data.BackrefMetaKey)
+	if raw == "" {
+		t.Fatal("backref user-metadata header missing")
+	}
+	dec, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		t.Fatalf("backref header not base64: %v", err)
+	}
+	ref, err := data.DecodeBackref(dec)
+	if err != nil {
+		t.Fatalf("DecodeBackref: %v", err)
+	}
+	if ref.BucketID != bid {
+		t.Errorf("BucketID: want %s, got %s", bid, ref.BucketID)
+	}
+	if ref.Key != "path/to/obj" {
+		t.Errorf("Key: want path/to/obj, got %q", ref.Key)
+	}
+	if ref.VersionID != verID {
+		t.Errorf("VersionID: want %s, got %s", verID, ref.VersionID)
+	}
+	if !ref.Mtime.Equal(mtime) {
+		t.Errorf("Mtime: want %v, got %v", mtime, ref.Mtime)
+	}
+}
+
+// TestPutChunksNoBackrefWhenCtxAbsent pins the graceful-degrade path: with
+// no identity on ctx, no backref header is sent (legacy behaviour).
+func TestPutChunksNoBackrefWhenCtxAbsent(t *testing.T) {
+	captured := &headerCapturingTransport{}
+	b := openTestBackend(t, captured)
+	if _, err := b.PutChunks(context.Background(), strings.NewReader("x"), "STANDARD"); err != nil {
+		t.Fatalf("PutChunks: %v", err)
+	}
+	if got := captured.lastHeader("X-Amz-Meta-" + data.BackrefMetaKey); got != "" {
+		t.Fatalf("backref header must be absent, got %q", got)
 	}
 }
 

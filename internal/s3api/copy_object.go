@@ -126,7 +126,18 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 	}
 	defer rc.Close()
 
-	m, err := s.Data.PutChunks(s.dataCtxForPut(r.Context(), dstBucket, dstKey), rc, class)
+	// Pre-decide version_id + mtime so the dst chunk back-reference (US-001)
+	// carries the version_id the meta store will record; pre-set on the
+	// Object below. Only Enabled mints a real TimeUUID (Suspended → IsNull
+	// → NullVersionID below).
+	putMtime := time.Now().UTC()
+	versionID := meta.NullVersionID
+	if dstBucket.Versioning == meta.VersioningEnabled {
+		versionID = meta.NewVersionID()
+	}
+	putCtx := data.WithBackref(s.dataCtxForPut(r.Context(), dstBucket, dstKey),
+		data.BackrefAttrs{BucketID: dstBucket.ID, Key: dstKey, VersionID: versionID, Mtime: putMtime})
+	m, err := s.Data.PutChunks(putCtx, rc, class)
 	if err != nil {
 		var drainRefused *data.DrainRefusedError
 		if errors.As(err, &drainRefused) {
@@ -144,10 +155,11 @@ func (s *Server) copyObject(w http.ResponseWriter, r *http.Request, dstBucket *m
 	obj := &meta.Object{
 		BucketID:     dstBucket.ID,
 		Key:          dstKey,
+		VersionID:    versionID,
 		Size:         m.Size,
 		ETag:         m.ETag,
 		StorageClass: m.Class,
-		Mtime:        time.Now().UTC(),
+		Mtime:        putMtime,
 		Manifest:     m,
 	}
 	if dstSSEC.Present {
@@ -267,4 +279,3 @@ func copyStringMap(in map[string]string) map[string]string {
 	}
 	return out
 }
-

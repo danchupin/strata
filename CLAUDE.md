@@ -192,6 +192,39 @@ concrete = one class, `rados.EnumerateAllNamespaces` ("\x01" == librados
 `LIBRADOS_ALL_NSPACES`) = every namespace. `ScanLimiter` lives in the
 always-on main module (not cephimpl) so the go-ceph side needs no rate dep.
 
+**Chunk back-reference stamped at PUT (US-001 metadata-data-reconcile).**
+Every chunk written to the data tier carries a self-describing owner
+pointer so reconcile/rebuild can run from data alone. Payload shape +
+codec are always-on in `internal/data/backref.go`: `data.Backref{BucketID,
+Key, VersionID, ChunkIdx, Mtime}` ↔ `EncodeBackref`/`DecodeBackref` (compact
+versioned wire form, leading `BackrefSchemaV1` byte reserves room for a
+future refcount-aware multi-owner shape — content-addressed dedup ROADMAP
+P2). **Carries NO key material** (no plaintext, no wrapped DEK) — safe under
+SSE; rebuild-index reports SSE objects unrecoverable instead. **Mtime is
+REQUIRED** — version_id orders the chain but can't derive IsLatest when a
+suspended-null version (ts=0) coexists. The identity is threaded onto the
+data-plane ctx via `data.WithBackref`/`BackrefFromContext`; the gateway
+handler (`putObject` + `copyObject`) decides `version_id` + `mtime` BEFORE
+`PutChunks` (only `Enabled` buckets mint a real `meta.NewVersionID()` v1
+TimeUUID; Disabled/Suspended → `NullVersionID`) and pre-sets them on BOTH
+the ctx AND the `meta.Object` so the two tiers agree — that match is what
+reconcile (US-002) uses to pair a chunk with its manifest. RADOS leg:
+`(*cephimpl.Backend).PutChunks` stamps `data.BackrefXattrName`
+(`user.strata.backref`) in the SAME `WriteOp` as the body via
+`writeChunkBatched` (one Operate, no extra RTT; routes through the batched
+helper whenever a backref is present, regardless of `STRATA_RADOS_BATCH_OPS`).
+S3-passthrough leg: `s3.Backend.PutChunks` stamps the same payload (base64)
+as `x-amz-meta-strata-backref` user-metadata (one backing object per PUT →
+ChunkIdx 0; reconciles via native ListObjects, no pool-enumeration dep).
+Memory backend no-ops. On by default; opt out with `STRATA_CHUNK_BACKREF=false`
+(`data.BackrefEnabledFromEnv`, read once at backend New) → legacy no-xattr,
+reconcile/rebuild degrade gracefully. **Multipart-origin chunks are NOT yet
+covered** (part chunks are written before the final object version_id is
+known) — deferred to trailing story `US-001b`, see ROADMAP "Known latent
+bugs". Hot-path cost (one SetXattr riding the existing WriteOp) is within
+bare-WriteFull p99 noise — see
+`docs/site/content/architecture/benchmarks/rados-ops.md`.
+
 `cephimpl` exposes its own `RadosCluster` interface (structurally identical
 to `internal/rebalance.RadosCluster`) so it does NOT need to import
 `internal/rebalance` — the workspace MVS would otherwise re-load the whole

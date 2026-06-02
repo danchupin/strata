@@ -24,6 +24,11 @@ func New() *Backend {
 	return &Backend{chunks: make(map[string][]byte)}
 }
 
+// PutChunks ignores the chunk back-reference (US-001 metadata-data-reconcile)
+// on ctx: back-references are a data-tier-durability concept (RADOS xattr /
+// S3 object metadata) so a reconcile / rebuild can run from data alone. The
+// in-memory backend holds chunks in a process-local map with no persistence
+// to reconcile, so it is a deliberate no-op.
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
 	if class == "" {
 		class = "STANDARD"
