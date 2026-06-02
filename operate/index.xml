@@ -248,4 +248,14 @@ signature no longer matches. There is &lt;strong&gt;no maintainer-held private k
 leak or rotate&lt;/strong&gt;; the trust root is GitHub&amp;rsquo;s OIDC issuer plus the public
 Sigstore infrastructure. The Rekor entry is append-only and publicly
 queryable, so a forensic investigation can prove exactly which workflow
-run, at which commit, produced a given digest — even years later.&lt;/p&gt;</description></item></channel></rss>
+run, at which commit, produced a given digest — even years later.&lt;/p&gt;</description></item><item><title>Pre-prod validation walkthrough</title><link>https://danchupin.github.io/strata/operate/pre-prod-validation/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/pre-prod-validation/</guid><description>&lt;h1 id="pre-prod-validation-walkthrough"&gt;Pre-prod validation walkthrough&lt;a class="anchor" href="#pre-prod-validation-walkthrough"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;This is the release-owner runbook: a &lt;strong&gt;single documented pass&lt;/strong&gt; that brings
+up both production labs and exercises the whole hardened object path so the
+GO/NO-GO decision rests on observed behaviour, not story-by-story claims. It
+is the operator-facing companion to the per-feature smokes — it composes them
+into one walkthrough and records a pass/fail-per-leg readiness note.&lt;/p&gt;
+&lt;p&gt;The composite is &lt;code&gt;scripts/smoke-architecture-hardening.sh&lt;/code&gt;, wired as
+&lt;code&gt;make smoke-architecture-hardening&lt;/code&gt;. Each leg is independent: it WARN-skips
+when its lab is down and only fails the run on a real assertion failure. Set
+&lt;code&gt;REQUIRE_LAB=1&lt;/code&gt; to promote a down lab to a hard fail (use this in CI where the
+labs are guaranteed up).&lt;/p&gt;</description></item></channel></rss>
