@@ -38,8 +38,8 @@ jobs:
       STRATA_CASSANDRA_MAX_HEAP: '3072M'
       STRATA_CASSANDRA_NEW_HEAP: '768M'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true

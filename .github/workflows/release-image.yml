@@ -65,7 +65,7 @@ jobs:
       image: ${{ env.IMAGE_NAME }}
       digest: ${{ steps.push.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # SHA-pinned third-party action (US-006 AC / S1):
       #   docker/login-action v4.2.0 →
