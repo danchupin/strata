@@ -1113,7 +1113,26 @@ acquires the lease for a given worker and runs it; the others stand by and
 take over if the leader&amp;rsquo;s lease expires. Leases are scoped per-worker, so
 different replicas can lead different workers — &lt;code&gt;gc&lt;/code&gt; on replica A,
 &lt;code&gt;lifecycle&lt;/code&gt; on replica B. Workers panic-restart on exponential backoff so a
-single iteration error never takes a worker offline permanently.&lt;/p&gt;</description></item><item><title>Bench runner setup (self-hosted)</title><link>https://danchupin.github.io/strata/developers/bench-runner-setup/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/developers/bench-runner-setup/</guid><description>&lt;h1 id="bench-runner-setup-self-hosted"&gt;Bench runner setup (self-hosted)&lt;a class="anchor" href="#bench-runner-setup-self-hosted"&gt;#&lt;/a&gt;&lt;/h1&gt;
+single iteration error never takes a worker offline permanently.&lt;/p&gt;</description></item><item><title>Reconcile + rebuild-index</title><link>https://danchupin.github.io/strata/operate/metadata-data-reconcile/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/metadata-data-reconcile/</guid><description>&lt;h1 id="reconcile--rebuild-index"&gt;Reconcile + rebuild-index&lt;a class="anchor" href="#reconcile--rebuild-index"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata splits the S3-key→chunk map (&lt;strong&gt;meta&lt;/strong&gt; tier: TiKV / Cassandra)
+from the chunk bytes (&lt;strong&gt;data&lt;/strong&gt; tier: RADOS / S3-over-S3). That split
+is the scale advantage — but it drops the safety net RGW gets by
+colocating its bucket index with the data. After you restore one tier
+from a backup that is even slightly out of step with the other, the
+two tiers diverge silently:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Orphan chunks&lt;/strong&gt; — data has a chunk no manifest references. GC walks
+meta→data, so it can never see them; they leak storage forever.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Dangling manifests&lt;/strong&gt; — meta has a manifest pointing at a chunk the
+data tier no longer holds. The client discovers it as a &lt;code&gt;5xx&lt;/code&gt; on
+&lt;code&gt;GET&lt;/code&gt;, not on the restore.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Lost meta backup&lt;/strong&gt; — the bytes are intact in RADOS but unreadable,
+because the key→chunk map is gone.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This page is the post-restore runbook for realigning the two tiers.
+It pairs with &lt;a href="https://danchupin.github.io/strata/operate/backup-restore/"&gt;Backup + restore&lt;/a&gt;
+(how each tier is snapshotted) — run reconcile &lt;strong&gt;after&lt;/strong&gt; the restore
+drill, before you promote traffic.&lt;/p&gt;</description></item><item><title>Bench runner setup (self-hosted)</title><link>https://danchupin.github.io/strata/developers/bench-runner-setup/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/developers/bench-runner-setup/</guid><description>&lt;h1 id="bench-runner-setup-self-hosted"&gt;Bench runner setup (self-hosted)&lt;a class="anchor" href="#bench-runner-setup-self-hosted"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;The weekly RGW comparison bench
 (&lt;a href="https://danchupin.github.io/strata/architecture/benchmarks/rgw-comparison/"&gt;&lt;code&gt;.github/workflows/bench-rgw.yml&lt;/code&gt;&lt;/a&gt;)
 runs on a self-hosted GitHub Actions runner labelled

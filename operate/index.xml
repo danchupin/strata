@@ -167,7 +167,26 @@ external backup tooling.&lt;/li&gt;
 &lt;p&gt;This page is a backup-strategy overview. Implementation details live in
 &lt;a href="https://danchupin.github.io/strata/architecture/workers/"&gt;Architecture — Workers&lt;/a&gt; (the
 inventory + replicator workers) and the upstream docs for Ceph /
-Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/operate/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
+Cassandra / TiKV.&lt;/p&gt;</description></item><item><title>Reconcile + rebuild-index</title><link>https://danchupin.github.io/strata/operate/metadata-data-reconcile/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/metadata-data-reconcile/</guid><description>&lt;h1 id="reconcile--rebuild-index"&gt;Reconcile + rebuild-index&lt;a class="anchor" href="#reconcile--rebuild-index"&gt;#&lt;/a&gt;&lt;/h1&gt;
+&lt;p&gt;Strata splits the S3-key→chunk map (&lt;strong&gt;meta&lt;/strong&gt; tier: TiKV / Cassandra)
+from the chunk bytes (&lt;strong&gt;data&lt;/strong&gt; tier: RADOS / S3-over-S3). That split
+is the scale advantage — but it drops the safety net RGW gets by
+colocating its bucket index with the data. After you restore one tier
+from a backup that is even slightly out of step with the other, the
+two tiers diverge silently:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;Orphan chunks&lt;/strong&gt; — data has a chunk no manifest references. GC walks
+meta→data, so it can never see them; they leak storage forever.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Dangling manifests&lt;/strong&gt; — meta has a manifest pointing at a chunk the
+data tier no longer holds. The client discovers it as a &lt;code&gt;5xx&lt;/code&gt; on
+&lt;code&gt;GET&lt;/code&gt;, not on the restore.&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;Lost meta backup&lt;/strong&gt; — the bytes are intact in RADOS but unreadable,
+because the key→chunk map is gone.&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;This page is the post-restore runbook for realigning the two tiers.
+It pairs with &lt;a href="https://danchupin.github.io/strata/operate/backup-restore/"&gt;Backup + restore&lt;/a&gt;
+(how each tier is snapshotted) — run reconcile &lt;strong&gt;after&lt;/strong&gt; the restore
+drill, before you promote traffic.&lt;/p&gt;</description></item><item><title>Capacity planning</title><link>https://danchupin.github.io/strata/operate/capacity-planning/</link><pubDate>Mon, 01 Jan 0001 00:00:00 +0000</pubDate><guid>https://danchupin.github.io/strata/operate/capacity-planning/</guid><description>&lt;h1 id="capacity-planning"&gt;Capacity planning&lt;a class="anchor" href="#capacity-planning"&gt;#&lt;/a&gt;&lt;/h1&gt;
 &lt;p&gt;Capacity on a Strata deploy splits across three independently-scaled
 tiers:&lt;/p&gt;
 &lt;ul&gt;
