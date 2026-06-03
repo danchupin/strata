@@ -2,7 +2,7 @@
 
 # Stage 1: build the React console with pnpm + Vite. Output (web/dist)
 # is copied into the Go build stage and embedded via go:embed.
-FROM node:20-alpine AS web
+FROM node:26-alpine AS web
 RUN corepack disable && npm install -g pnpm@9
 WORKDIR /web
 COPY web/package.json web/pnpm-lock.yaml ./
