@@ -113,26 +113,43 @@ func (b *Backend) EnumeratePool(ctx context.Context, cluster string, opts rados.
 			continue
 		}
 		obj := rados.PoolObject{OID: oid, Namespace: iter.Namespace()}
-		if opts.WithBackref {
-			// One GetXattr riding the same cached ioctx (no second Iter). A
-			// missing xattr (legacy / STRATA_CHUNK_BACKREF=false chunk) yields
-			// a nil Backref, not an error — reconcile reports it absent.
-			br, gerr := readBackrefXattr(ioctx, oid)
-			if gerr != nil {
-				return fmt.Errorf("rados: enumerate read backref %s: %w", oid, gerr)
+		if opts.WithBackref || opts.WithSize {
+			// Per-object xattr/stat ops CANNOT run on an ALL_NSPACES
+			// enumeration ioctx — LIBRADOS_ALL_NSPACES is enumerate-only, so a
+			// GetXattr/Stat against it errors and (a per-object error aborts
+			// the walk) silently truncates the scan. Route per-object reads
+			// through a namespace-correct ioctx for the object's actual
+			// namespace (connPool caches one per pool|ns, so it's a map hit
+			// after the first object of each namespace). When a CONCRETE
+			// namespace was requested the enumeration ioctx already matches, so
+			// reuse it directly.
+			readIoctx := ioctx
+			if opts.Namespace == rados.EnumerateAllNamespaces {
+				nsIoctx, nerr := b.ioctx(ctx, cluster, opts.Pool, iter.Namespace())
+				if nerr != nil {
+					return fmt.Errorf("rados: enumerate ns ioctx %s/%s ns=%q: %w", cluster, opts.Pool, iter.Namespace(), nerr)
+				}
+				readIoctx = nsIoctx
 			}
-			obj.Backref = br
-		}
-		if opts.WithSize {
-			// One Stat riding the same cached ioctx (no second Iter). A
-			// vanished object (restore/GC race between Iter and Stat) yields
-			// size 0, not an error — reconcile/rebuild treats a zero-size read
-			// as a degraded chunk rather than failing the whole walk.
-			sz, serr := readChunkSize(ioctx, oid)
-			if serr != nil {
-				return fmt.Errorf("rados: enumerate stat %s: %w", oid, serr)
+			if opts.WithBackref {
+				// A missing xattr (legacy / STRATA_CHUNK_BACKREF=false chunk)
+				// yields a nil Backref, not an error — reconcile reports it absent.
+				br, gerr := readBackrefXattr(readIoctx, oid)
+				if gerr != nil {
+					return fmt.Errorf("rados: enumerate read backref %s: %w", oid, gerr)
+				}
+				obj.Backref = br
 			}
-			obj.Size = sz
+			if opts.WithSize {
+				// A vanished object (restore/GC race between Iter and Stat)
+				// yields size 0, not an error — reconcile/rebuild treats a
+				// zero-size read as a degraded chunk rather than failing the walk.
+				sz, serr := readChunkSize(readIoctx, oid)
+				if serr != nil {
+					return fmt.Errorf("rados: enumerate stat %s: %w", oid, serr)
+				}
+				obj.Size = sz
+			}
 		}
 		if err := visit(obj, rados.EnumerateCursor(uint32(iter.Token()))); err != nil {
 			return err
