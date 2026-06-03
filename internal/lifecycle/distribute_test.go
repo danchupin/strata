@@ -46,12 +46,19 @@ func TestBucketReplicaIndexDeterministic(t *testing.T) {
 
 // TestBucketReplicaIndexDistribution sanity-checks the hash spread: 90
 // buckets across 3 replicas land within ±50% of even.
+//
+// Bucket IDs are DETERMINISTIC (md5 of a fixed counter → a valid UUID) rather
+// than uuid.New(): the old random-input version was a dice roll against a tight
+// ±50% gate — with 90 draws over 3 bins (Binomial mean 30, σ≈4.7) a ~3σ tail
+// like 46 lands just over the 45 ceiling and flaked CI (~1/few-thousand runs).
+// A fixed input makes the spread reproducible while still exercising the hash.
 func TestBucketReplicaIndexDistribution(t *testing.T) {
 	const buckets = 90
 	const replicas = 3
 	hist := make([]int, replicas)
-	for range buckets {
-		id := uuid.New().String()
+	for i := range buckets {
+		sum := md5.Sum([]byte(fmt.Sprintf("bucket-replica-spread-%d", i)))
+		id := uuid.Must(uuid.FromBytes(sum[:])).String()
 		hist[bucketReplicaIndex(id, replicas)]++
 	}
 	expected := buckets / replicas

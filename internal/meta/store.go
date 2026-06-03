@@ -40,98 +40,104 @@ func ResolveVersionID(v string) string {
 }
 
 var (
-	ErrBucketNotFound        = errors.New("bucket not found")
-	ErrBucketAlreadyExists   = errors.New("bucket already exists")
-	ErrBucketNotEmpty        = errors.New("bucket not empty")
-	ErrObjectNotFound        = errors.New("object not found")
-	ErrObjectLocked          = errors.New("object is protected by retention or legal hold")
-	ErrMultipartNotFound     = errors.New("multipart upload not found")
-	ErrMultipartInProgress   = errors.New("multipart upload is already completing or aborted")
-	ErrMultipartPartMissing  = errors.New("multipart part not found")
-	ErrMultipartETagMismatch = errors.New("multipart part etag mismatch")
-	ErrNoSuchLifecycle       = errors.New("no lifecycle configuration for bucket")
-	ErrNoSuchCORS            = errors.New("no cors configuration for bucket")
-	ErrNoSuchBucketPolicy    = errors.New("no policy configured for bucket")
-	ErrNoSuchPublicAccessBlock = errors.New("no public access block configuration for bucket")
-	ErrNoSuchOwnershipControls = errors.New("no ownership controls configured for bucket")
-	ErrNoSuchEncryption        = errors.New("no encryption configuration for bucket")
-	ErrNoSuchObjectLockConfig  = errors.New("no object lock configuration for bucket")
-	ErrNoSuchNotification      = errors.New("no notification configuration for bucket")
-	ErrNoSuchWebsite           = errors.New("no website configuration for bucket")
-	ErrNoSuchReplication       = errors.New("no replication configuration for bucket")
-	ErrNoSuchLogging           = errors.New("no logging configuration for bucket")
-	ErrNoSuchTagSet            = errors.New("no tag set configured for bucket")
-	ErrNoSuchGrants            = errors.New("no acl grants persisted for resource")
-	ErrNoSuchInventoryConfig   = errors.New("no inventory configuration with that id")
-	ErrAccessPointAlreadyExists = errors.New("access point with that name already exists")
-	ErrAccessPointNotFound      = errors.New("access point not found")
-	ErrReshardInProgress       = errors.New("a reshard is already in progress for this bucket")
-	ErrReshardNotFound         = errors.New("no reshard job for this bucket")
-	ErrReshardInvalidTarget    = errors.New("reshard target must be a positive power of two greater than the current shard count")
-	ErrIAMUserNotFound         = errors.New("iam user not found")
-	ErrIAMUserAlreadyExists    = errors.New("iam user already exists")
-	ErrIAMAccessKeyNotFound    = errors.New("iam access key not found")
-	ErrManagedPolicyNotFound      = errors.New("managed policy not found")
-	ErrManagedPolicyAlreadyExists = errors.New("managed policy already exists")
-	ErrPolicyAttached             = errors.New("managed policy is attached to one or more users")
-	ErrUserPolicyNotAttached      = errors.New("managed policy is not attached to user")
-	ErrUserPolicyAlreadyAttached  = errors.New("managed policy is already attached to user")
+	ErrBucketNotFound              = errors.New("bucket not found")
+	ErrBucketAlreadyExists         = errors.New("bucket already exists")
+	ErrBucketNotEmpty              = errors.New("bucket not empty")
+	ErrObjectNotFound              = errors.New("object not found")
+	ErrObjectLocked                = errors.New("object is protected by retention or legal hold")
+	ErrMultipartNotFound           = errors.New("multipart upload not found")
+	ErrMultipartInProgress         = errors.New("multipart upload is already completing or aborted")
+	ErrMultipartPartMissing        = errors.New("multipart part not found")
+	ErrMultipartETagMismatch       = errors.New("multipart part etag mismatch")
+	ErrNoSuchLifecycle             = errors.New("no lifecycle configuration for bucket")
+	ErrNoSuchCORS                  = errors.New("no cors configuration for bucket")
+	ErrNoSuchBucketPolicy          = errors.New("no policy configured for bucket")
+	ErrNoSuchPublicAccessBlock     = errors.New("no public access block configuration for bucket")
+	ErrNoSuchOwnershipControls     = errors.New("no ownership controls configured for bucket")
+	ErrNoSuchEncryption            = errors.New("no encryption configuration for bucket")
+	ErrNoSuchObjectLockConfig      = errors.New("no object lock configuration for bucket")
+	ErrNoSuchNotification          = errors.New("no notification configuration for bucket")
+	ErrNoSuchWebsite               = errors.New("no website configuration for bucket")
+	ErrNoSuchReplication           = errors.New("no replication configuration for bucket")
+	ErrNoSuchLogging               = errors.New("no logging configuration for bucket")
+	ErrNoSuchTagSet                = errors.New("no tag set configured for bucket")
+	ErrNoSuchGrants                = errors.New("no acl grants persisted for resource")
+	ErrNoSuchInventoryConfig       = errors.New("no inventory configuration with that id")
+	ErrAccessPointAlreadyExists    = errors.New("access point with that name already exists")
+	ErrAccessPointNotFound         = errors.New("access point not found")
+	ErrReshardInProgress           = errors.New("a reshard is already in progress for this bucket")
+	ErrReshardNotFound             = errors.New("no reshard job for this bucket")
+	ErrReshardInvalidTarget        = errors.New("reshard target must be a positive power of two greater than the current shard count")
+	ErrIAMUserNotFound             = errors.New("iam user not found")
+	ErrIAMUserAlreadyExists        = errors.New("iam user already exists")
+	ErrIAMAccessKeyNotFound        = errors.New("iam access key not found")
+	ErrManagedPolicyNotFound       = errors.New("managed policy not found")
+	ErrManagedPolicyAlreadyExists  = errors.New("managed policy already exists")
+	ErrPolicyAttached              = errors.New("managed policy is attached to one or more users")
+	ErrUserPolicyNotAttached       = errors.New("managed policy is not attached to user")
+	ErrUserPolicyAlreadyAttached   = errors.New("managed policy is already attached to user")
 	ErrMultipartCompletionNotFound = errors.New("multipart completion record not found or expired")
-	ErrNoRewrapProgress        = errors.New("no rewrap progress recorded for bucket")
-	ErrAdminJobNotFound        = errors.New("admin job not found")
-	ErrAdminJobAlreadyExists   = errors.New("admin job already exists")
+	ErrNoRewrapProgress            = errors.New("no rewrap progress recorded for bucket")
+	ErrAdminJobNotFound            = errors.New("admin job not found")
+	ErrAdminJobAlreadyExists       = errors.New("admin job already exists")
+	ErrReconcileNotFound           = errors.New("no reconcile job with that id")
+	// ErrReconcileInvalidPolicy is returned by StartReconcile for an unknown
+	// or not-yet-supported resolution policy. report + gc ship in US-002;
+	// restore is deferred to the trailing US-002b (shares the US-004
+	// rebuild-from-back-reference grouping) and is rejected until then.
+	ErrReconcileInvalidPolicy = errors.New("reconcile policy must be report or gc")
 	// ErrQuotaExceeded signals that a write would exceed a configured
 	// per-bucket or per-user quota (US-006). Surfaced from the gateway as
 	// HTTP 403 / S3 code "QuotaExceeded" — non-AWS but matches the RGW shape
 	// so existing tooling that already understands the code keeps working.
 	// Returned today only by gateway-level enforcement helpers; backend
 	// stores never raise it directly.
-	ErrQuotaExceeded           = errors.New("quota exceeded")
+	ErrQuotaExceeded = errors.New("quota exceeded")
 	// ErrInvalidPlacement signals a bucket Placement policy that fails
 	// structural validation: weight outside [0, 100], sum(weights) == 0, or
 	// an empty cluster name (US-001 placement-rebalance cycle).
-	ErrInvalidPlacement        = errors.New("invalid placement policy")
+	ErrInvalidPlacement = errors.New("invalid placement policy")
 	// ErrUnknownCluster signals a Placement entry references a cluster id
 	// that is not in the configured STRATA_RADOS_CLUSTERS / STRATA_S3_CLUSTERS
 	// set. The meta.Store itself never raises this — cluster name resolution
 	// happens in the admin handler. Defined here so all placement-related
 	// sentinels live in one place (US-001).
-	ErrUnknownCluster          = errors.New("unknown cluster id")
+	ErrUnknownCluster = errors.New("unknown cluster id")
 	// ErrInvalidClusterState signals a SetClusterState call with a value
 	// outside the allowed set ({"live", "draining_readonly", "evacuating",
 	// "removed"}) or with an (state, mode) combination that violates the
 	// 4-state machine (US-001 drain-transparency).
-	ErrInvalidClusterState     = errors.New("invalid cluster state")
+	ErrInvalidClusterState = errors.New("invalid cluster state")
 	// ErrInvalidClusterMode signals a SetClusterState call with a mode
 	// value outside {"", "readonly", "evacuate"}.
-	ErrInvalidClusterMode      = errors.New("invalid cluster mode")
+	ErrInvalidClusterMode = errors.New("invalid cluster mode")
 	// ErrInvalidClusterWeight signals a SetClusterState call with a
 	// weight outside [0, 100] (US-001 cluster-weights).
-	ErrInvalidClusterWeight    = errors.New("invalid cluster weight")
+	ErrInvalidClusterWeight = errors.New("invalid cluster weight")
 	// ErrInvalidPlacementMode signals a SetBucketPlacementMode call with
 	// a value outside {"", "weighted", "strict"} (US-001 effective-
 	// placement). Empty string is legal and means "default weighted".
-	ErrInvalidPlacementMode    = errors.New("invalid placement mode")
+	ErrInvalidPlacementMode = errors.New("invalid placement mode")
 	// ErrInvalidShard signals a ListBucketsShard call with shardID
 	// outside [0, totalShards) or totalShards < 1 (US-001 rebalance-
 	// scale-phase-2).
-	ErrInvalidShard            = errors.New("invalid shard id or count")
+	ErrInvalidShard = errors.New("invalid shard id or count")
 	// ErrInvalidECPolicy signals a SetBucketECPolicy call with non-
 	// positive K or M (US-007 EC-aware manifests).
-	ErrInvalidECPolicy         = errors.New("invalid EC policy")
+	ErrInvalidECPolicy = errors.New("invalid EC policy")
 	// ErrNoSuchECPolicy signals GetBucketECPolicy / DeleteBucketECPolicy
 	// against a bucket with no stored EC policy.
-	ErrNoSuchECPolicy          = errors.New("no EC policy configured")
+	ErrNoSuchECPolicy = errors.New("no EC policy configured")
 	// ErrInconsistentECPolicy signals that the requested (k, m) does
 	// not match the underlying cluster's erasure-code capability
 	// (US-007). Surfaced as HTTP 409 by the admin handler.
-	ErrInconsistentECPolicy    = errors.New("inconsistent EC policy")
+	ErrInconsistentECPolicy = errors.New("inconsistent EC policy")
 	// ErrBucketSigningKeyNotSet signals GetBucketSigningKey against a
 	// bucket that has no per-bucket signing key persisted (US-001
 	// auth-dx-trailer-lima). Callers must treat this as "not set" and
 	// fall through to the IAM access-key SigV4 path — per-bucket signing
 	// keys are OPT-IN per bucket.
-	ErrBucketSigningKeyNotSet  = errors.New("no per-bucket signing key set")
+	ErrBucketSigningKeyNotSet = errors.New("no per-bucket signing key set")
 )
 
 const (
@@ -146,7 +152,7 @@ const (
 	// semantics: when its Placement policy references only draining
 	// clusters, PUTs return 503 DrainRefused (no fallback) and drain
 	// workflows refuse to fire until the operator edits the policy.
-	PlacementModeStrict   = "strict"
+	PlacementModeStrict = "strict"
 )
 
 // ValidatePlacementMode enforces the legal set of placement-mode
@@ -369,6 +375,131 @@ const (
 	AdminJobStateError   = "error"
 )
 
+// ReconcileJob is a queued or running data-tier reconcile pass (US-002
+// metadata-data-reconcile). It is created by StartReconcile (the admin
+// POST handler) and drained out-of-band by the leader-elected `reconcile`
+// worker, mirroring the reshard admin-queue pattern: the HTTP request only
+// QUEUES the job (202) and the worker walks the pool on a tick so a
+// live-cluster scan never blocks the request goroutine.
+//
+// A job runs in one of two directions, discriminated by Bucket:
+//
+//   - Bucket == "" — an ORPHAN pass (US-002, data->meta): scope is a single
+//     (Cluster, Pool, Namespace); the worker enumerates the data tier, reads
+//     each chunk's back-reference (US-001), looks the owner up in meta, and
+//     resolves orphan chunks (chunk present, no manifest references it) by a
+//     report|gc Policy.
+//   - Bucket != "" — a DANGLING pass (US-003, meta->data): scope is one bucket
+//     (Bucket holds its UUID string); the worker walks every object version's
+//     manifest and probes that each referenced chunk still exists in the data
+//     tier. A dangling manifest (manifest present, chunk missing) is resolved
+//     by a report|quarantine Policy — quarantine marks the object unreadable
+//     (QuarantineReason) so a GET returns a clear error, never a silent corrupt
+//     5xx. Cluster/Pool/Namespace are unused.
+//
+// Cursor is the opaque resume watermark the scanner persists per batch so a
+// crashed/relased pass resumes instead of re-walking from the front
+// (idempotent + resumable). State transitions queued -> running -> done|error;
+// done/error rows persist for status polling and are NOT returned by
+// ListReconcileJobs (the worker drains only queued|running).
+type ReconcileJob struct {
+	ID        string
+	Cluster   string
+	Pool      string
+	Namespace string
+	// Bucket discriminates the pass direction. Empty == orphan pass (data->
+	// meta, scoped to Cluster/Pool/Namespace). Non-empty == dangling pass
+	// (meta->data, scoped to this bucket UUID string).
+	Bucket  string
+	Policy  string
+	Cursor  string
+	State   string
+	Message string
+	// Scanned counts chunk OIDs visited (orphan pass); Orphans* break the
+	// orphans down by the resolution applied; AbsentBackref counts chunks with
+	// no back-reference (legacy / STRATA_CHUNK_BACKREF=false) — never deleted,
+	// always reported; Errors counts per-chunk lookup/probe failures.
+	Scanned       int64
+	OrphansFound  int64
+	OrphansGC     int64
+	OrphansReport int64
+	// OrphansRestore counts orphan chunks whose manifest row was rebuilt from
+	// the back-reference (US-002b restore policy). An orphan is restored only
+	// when its version row is genuinely absent; an overwritten version (manifest
+	// present, references a different OID), a gapped sequence, or an SSE object
+	// falls back to OrphansReport (never clobbered, never served as ciphertext).
+	OrphansRestore int64
+	AbsentBackref  int64
+	Errors         int64
+	// Dangling-pass (US-003) counters: ManifestsScanned counts object versions
+	// walked; Healthy counts versions whose chunks all exist; DanglingFound
+	// counts versions with a missing chunk, broken down into DanglingQuarantine
+	// (marked unreadable) + DanglingReport (counted only, no mutation) +
+	// DanglingDelete (US-003b — chunks GC-enqueued, version row removed).
+	ManifestsScanned   int64
+	Healthy            int64
+	DanglingFound      int64
+	DanglingQuarantine int64
+	DanglingReport     int64
+	DanglingDelete     int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+const (
+	// ReconcilePolicyReport is the DEFAULT — orphans are counted and reported,
+	// never deleted. The safe post-restore first pass: an operator reviews the
+	// summary before choosing a destructive policy.
+	ReconcilePolicyReport = "report"
+	// ReconcilePolicyGC enqueues each orphan chunk for deletion via the GC
+	// queue (the object was rolled back; the chunk is genuinely unreferenced).
+	ReconcilePolicyGC = "gc"
+	// ReconcilePolicyRestore rebuilds the manifest row from the back-reference
+	// (meta-older-than-data skew: the chunk's owner survives in the data tier
+	// but its manifest row is gone). Reuses the US-004 rebuild grouping (gather
+	// every chunk for {bucket_id, key, version_id}, order by chunk_idx,
+	// recompute the single-part ETag, set IsLatest via the back-reference
+	// mtime). PLAINTEXT-ONLY (same boundary as rebuild-index): an SSE object is
+	// reported unrecoverable, never restored as ciphertext. Restore writes a
+	// version ONLY when its row is genuinely absent — an overwritten version
+	// still carries a valid manifest and is reported (never clobbered).
+	ReconcilePolicyRestore = "restore"
+	// ReconcilePolicyQuarantine is a DANGLING-pass (US-003) policy: a manifest
+	// whose chunk is missing has its object version marked unreadable
+	// (QuarantineReason) so a GET/HEAD returns a clear error instead of a
+	// silent corrupt 5xx. Valid only for a bucket-scoped dangling job.
+	ReconcilePolicyQuarantine = "quarantine"
+	// ReconcilePolicyDelete is a DANGLING-pass (US-003b) policy: a manifest with
+	// a missing chunk is genuinely broken (the object can never be served), so
+	// the worker enqueues the version's chunks for GC (mirrors the US-002 gc
+	// care — the dual-write _by_cluster lookup stays in lockstep, GC dedups by
+	// OID so a re-run never double-deletes) and removes the object-version row.
+	// More aggressive than quarantine — only an operator who has decided the
+	// version is unrecoverable runs it. Valid only for a bucket-scoped dangling
+	// job.
+	ReconcilePolicyDelete = "delete"
+
+	ReconcileStateQueued  = "queued"
+	ReconcileStateRunning = "running"
+	ReconcileStateDone    = "done"
+	ReconcileStateError   = "error"
+)
+
+// IsValidReconcilePolicy reports whether p is a policy the US-002 ORPHAN pass
+// can execute: report (count only), gc (enqueue the orphan for deletion), or
+// restore (US-002b — rebuild the manifest row from the back-reference).
+// StartReconcile maps an unrecognised policy to ErrReconcileInvalidPolicy.
+func IsValidReconcilePolicy(p string) bool {
+	return p == ReconcilePolicyReport || p == ReconcilePolicyGC || p == ReconcilePolicyRestore
+}
+
+// IsValidDanglingPolicy reports whether p is a policy the US-003 DANGLING pass
+// can execute (report — count only; quarantine — mark the object unreadable;
+// delete — GC the version's chunks + remove the row, US-003b).
+func IsValidDanglingPolicy(p string) bool {
+	return p == ReconcilePolicyReport || p == ReconcilePolicyQuarantine || p == ReconcilePolicyDelete
+}
+
 // RewrapProgress tracks a master-key rewrap pass for a single bucket. Used by
 // `strata admin rewrap` for resumability across runs.
 type RewrapProgress struct {
@@ -548,9 +679,9 @@ type Bucket struct {
 	// unwrap), SigningKeyCreatedAt is the wall-clock time the operator
 	// rotated. Absence (zero values) means the bucket has no per-bucket
 	// signing key and SigV4 falls through to the IAM access-key path.
-	SigningWrappedDEK    []byte    `json:"signing_wrapped_dek,omitempty"`
-	SigningKeyID         string    `json:"signing_key_id,omitempty"`
-	SigningKeyCreatedAt  time.Time `json:"signing_key_created_at,omitempty"`
+	SigningWrappedDEK   []byte    `json:"signing_wrapped_dek,omitempty"`
+	SigningKeyID        string    `json:"signing_key_id,omitempty"`
+	SigningKeyCreatedAt time.Time `json:"signing_key_created_at,omitempty"`
 }
 
 // ECPolicy mirrors data.ECParams at the bucket-declaration layer. K data
@@ -577,33 +708,33 @@ type Object struct {
 	// PutObject takes the Suspended-null path that replaces just the prior
 	// null row instead of all rows). Paired with VersionID = NullVersionID.
 	// GET ?versionId=null resolves to the row with this flag.
-	IsNull         bool
-	Size           int64
-	ETag           string
-	ContentType    string
-	StorageClass   string
-	Mtime          time.Time
-	Manifest       *data.Manifest
-	UserMeta       map[string]string
-	Tags           map[string]string
-	RetainUntil    time.Time
-	RetainMode     string
-	LegalHold      bool
-	Checksums      map[string]string
-	SSE            string
-	SSECKeyMD5     string
-	SSEKey         []byte
-	SSEKeyID       string
-	RestoreStatus  string
-	PartsCount     int
+	IsNull        bool
+	Size          int64
+	ETag          string
+	ContentType   string
+	StorageClass  string
+	Mtime         time.Time
+	Manifest      *data.Manifest
+	UserMeta      map[string]string
+	Tags          map[string]string
+	RetainUntil   time.Time
+	RetainMode    string
+	LegalHold     bool
+	Checksums     map[string]string
+	SSE           string
+	SSECKeyMD5    string
+	SSEKey        []byte
+	SSEKeyID      string
+	RestoreStatus string
+	PartsCount    int
 	// PartSizes holds the plaintext byte size of each multipart part in
 	// PartNumber order. Empty for single-PUT objects. Populated by
 	// CompleteMultipartUpload so GET /<key>?partNumber=N can serve only
 	// part N's bytes without revisiting multipart_parts (which is deleted
 	// after Complete). Cassandra column: objects.part_sizes list<bigint>.
-	PartSizes      []int64
-	CacheControl   string
-	Expires        string
+	PartSizes         []int64
+	CacheControl      string
+	Expires           string
 	ReplicationStatus string
 	// ChecksumType is the AWS-defined object-checksum aggregation type:
 	// "COMPOSITE" for multipart objects whose composite checksum is
@@ -613,6 +744,13 @@ type Object struct {
 	// objects with no aggregation. Surfaced on HEAD/GET via the
 	// x-amz-checksum-type response header when ChecksumMode=ENABLED.
 	ChecksumType string
+	// QuarantineReason, when non-empty, marks the object version unreadable:
+	// the reconcile worker's dangling-manifest pass (US-003) found a
+	// referenced data chunk missing and quarantined the object so a GET/HEAD
+	// returns a deterministic clear error instead of a silent corrupt 5xx.
+	// Empty == healthy. Persisted via SetObjectQuarantine (a dedicated UPDATE,
+	// mirroring RestoreStatus); read back on the GET/HEAD path.
+	QuarantineReason string
 }
 
 type ListOptions struct {
@@ -630,11 +768,11 @@ type ListResult struct {
 }
 
 type ListVersionsResult struct {
-	Versions         []*Object
-	CommonPrefixes   []string
-	NextKeyMarker    string
-	NextVersionID    string
-	Truncated        bool
+	Versions       []*Object
+	CommonPrefixes []string
+	NextKeyMarker  string
+	NextVersionID  string
+	Truncated      bool
 }
 
 type MultipartUpload struct {
@@ -1073,6 +1211,12 @@ type Store interface {
 	SetObjectRetention(ctx context.Context, bucketID uuid.UUID, key, versionID, mode string, until time.Time) error
 	SetObjectLegalHold(ctx context.Context, bucketID uuid.UUID, key, versionID string, on bool) error
 	SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, key, versionID, status string) error
+	// SetObjectQuarantine marks (reason != "") or clears (reason == "") the
+	// object version's QuarantineReason. Set by the reconcile dangling pass
+	// (US-003) when a referenced data chunk is missing so the GET/HEAD path
+	// returns a clear error instead of a silent corrupt 5xx. Returns
+	// ErrObjectNotFound when the row is absent.
+	SetObjectQuarantine(ctx context.Context, bucketID uuid.UUID, key, versionID, reason string) error
 
 	SetBucketLifecycle(ctx context.Context, bucketID uuid.UUID, xmlBlob []byte) error
 	GetBucketLifecycle(ctx context.Context, bucketID uuid.UUID) ([]byte, error)
@@ -1360,6 +1504,25 @@ type Store interface {
 	// FinishedAt columns. Returns ErrAdminJobNotFound when no row exists.
 	UpdateAdminJob(ctx context.Context, job *AdminJob) error
 
+	// StartReconcile queues a data-tier reconcile pass and returns the created
+	// ReconcileJob (state=queued, a freshly minted ID). An empty bucket queues
+	// an ORPHAN pass over (cluster, pool, namespace) — policy must be report|gc
+	// (US-002). A non-empty bucket (its UUID string) queues a DANGLING pass
+	// over that bucket — policy must be report|quarantine (US-003). Returns
+	// ErrReconcileInvalidPolicy when the policy is not valid for the pass kind
+	// (restore is deferred to US-002b, delete to US-003b). The leader-elected
+	// reconcile worker drains the job out-of-band.
+	StartReconcile(ctx context.Context, cluster, pool, namespace, bucket, policy string) (*ReconcileJob, error)
+	// GetReconcileJob returns the job addressed by id (any state, including
+	// done/error for status polling), or ErrReconcileNotFound.
+	GetReconcileJob(ctx context.Context, id string) (*ReconcileJob, error)
+	// UpdateReconcileJob persists a Cursor/State/Message/counter update. The
+	// worker calls this after each scan batch so a crash resumes from Cursor.
+	UpdateReconcileJob(ctx context.Context, job *ReconcileJob) error
+	// ListReconcileJobs returns every queued or running reconcile job. The
+	// reconcile worker calls this on each tick; done/error rows are excluded.
+	ListReconcileJobs(ctx context.Context) ([]*ReconcileJob, error)
+
 	Close() error
 }
 
@@ -1445,6 +1608,18 @@ type ReshardMigrator interface {
 
 func IsVersioningActive(state string) bool {
 	return state == VersioningEnabled || state == VersioningSuspended
+}
+
+// NewVersionID mints a fresh v1 (time-based) UUID string for an object
+// version, matching the shape both backends mint internally (gocql.TimeUUID
+// / google-uuid v1 are wire-identical for the objects.version_id timeuuid
+// column). Callers that must decide the version id BEFORE the data backend
+// writes — so a chunk back-reference can carry the SAME version_id the meta
+// store will record (US-001 metadata-data-reconcile) — call this and
+// pre-set Object.VersionID; PutObject then honours the pre-set value
+// instead of minting its own.
+func NewVersionID() string {
+	return uuid.Must(uuid.NewUUID()).String()
 }
 
 // IsValidShardCount reports whether n is acceptable as a bucket shard count.

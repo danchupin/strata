@@ -10,6 +10,7 @@ import { OverviewPage } from '@/pages/Overview';
 import { AuditLogPage } from '@/pages/AuditLog';
 import { AuditTailPage } from '@/pages/AuditTail';
 import { HotBucketsPage } from '@/pages/HotBuckets';
+import { ReconcilePage } from '@/pages/Reconcile';
 import { TraceBrowserPage } from '@/pages/TraceBrowser';
 import { BucketsPage } from '@/pages/Buckets';
 import { BucketDetailPage } from '@/pages/BucketDetail';
@@ -93,6 +94,7 @@ export function App() {
         <Route path="/diagnostics/trace" element={<TraceBrowserPage />} />
         <Route path="/diagnostics/trace/:requestID" element={<TraceBrowserPage />} />
         <Route path="/diagnostics/hot-buckets" element={<HotBucketsPage />} />
+        <Route path="/diagnostics/reconcile" element={<ReconcilePage />} />
         <Route
           path="/diagnostics/slow-queries"
           element={

@@ -214,6 +214,45 @@ var (
 		[]string{"sink", "status"},
 	)
 
+	// ReconcileChunksScannedTotal counts data-tier chunk OIDs visited by the
+	// reconcile worker (US-002 metadata-data-reconcile).
+	ReconcileChunksScannedTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "strata_reconcile_chunks_scanned_total",
+		Help: "Total data-tier chunks visited by the reconcile worker.",
+	})
+
+	// ReconcileOrphansFoundTotal counts orphan chunks (chunk present, no
+	// manifest references it) broken down by the resolution applied:
+	// resolution=report (counted, never deleted — the default), gc (enqueued
+	// for deletion), or restore (manifest row rebuilt from the back-reference,
+	// US-002b).
+	ReconcileOrphansFoundTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_reconcile_orphans_found_total",
+			Help: "Orphan chunks found by the reconcile worker, per resolution (report|gc|restore).",
+		},
+		[]string{"resolution"},
+	)
+
+	// ReconcileErrorsTotal counts per-chunk reconcile errors (a meta lookup
+	// or GC enqueue failure) that were skipped rather than resolved — never
+	// delete on doubt.
+	ReconcileErrorsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "strata_reconcile_errors_total",
+		Help: "Per-chunk reconcile errors skipped (meta-lookup or GC-enqueue failure).",
+	})
+
+	// ReconcileDanglingManifestsTotal counts dangling manifests (manifest
+	// present, a referenced chunk missing) found by the reconcile worker's
+	// meta->data pass (US-003), per resolution (report|quarantine|delete).
+	ReconcileDanglingManifestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "strata_reconcile_dangling_manifests_total",
+			Help: "Dangling manifests found by the reconcile worker, per resolution (report|quarantine|delete).",
+		},
+		[]string{"resolution"},
+	)
+
 	MetaTikvAuditSweepDeleted = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "strata_meta_tikv_audit_sweep_deleted_total",
 		Help: "Audit rows expunged by the TiKV audit-retention sweeper (TiKV has no native TTL).",
@@ -566,10 +605,30 @@ func register() {
 		RebalanceStuckNoPolicyChunksTotal,
 		WorkerIterationTotal,
 		WorkerTickDurationSeconds,
+		ReconcileChunksScannedTotal,
+		ReconcileOrphansFoundTotal,
+		ReconcileErrorsTotal,
+		ReconcileDanglingManifestsTotal,
 	)
 	prewarmUS001Series()
 	prewarmUS006Series()
 }
+
+// ReconcileObserver adapts the reconcile worker's per-chunk counts onto the
+// prometheus counters. It satisfies reconcile.Observer structurally (the
+// reconcile package owns the interface; metrics must not import it, so the
+// wiring in cmd/strata/workers passes this value where reconcile.Observer is
+// expected).
+type ReconcileObserver struct{}
+
+func (ReconcileObserver) ChunkScanned() { ReconcileChunksScannedTotal.Inc() }
+func (ReconcileObserver) OrphanFound(resolution string) {
+	ReconcileOrphansFoundTotal.WithLabelValues(resolution).Inc()
+}
+func (ReconcileObserver) DanglingFound(resolution string) {
+	ReconcileDanglingManifestsTotal.WithLabelValues(resolution).Inc()
+}
+func (ReconcileObserver) ReconcileError() { ReconcileErrorsTotal.Inc() }
 
 // prewarmUS006Series materialises one zero-valued series per registered
 // worker name so `/metrics` exposes the worker_iteration_total +
@@ -605,6 +664,7 @@ var registeredWorkerNames = []string{
 	"usage-rollup",
 	"rebalance",
 	"reshard",
+	"reconcile",
 }
 
 func Handler() http.Handler { return promhttp.Handler() }
@@ -1084,8 +1144,8 @@ func (AuditStreamObserver) SetSubscribers(n int) {
 // adapters.
 type OTelRingbufObserver struct{}
 
-func (OTelRingbufObserver) SetTraces(n int)              { OTelRingbufTraces.Set(float64(n)) }
-func (OTelRingbufObserver) IncEvicted()                  { OTelRingbufEvicted.Inc() }
+func (OTelRingbufObserver) SetTraces(n int)               { OTelRingbufTraces.Set(float64(n)) }
+func (OTelRingbufObserver) IncEvicted()                   { OTelRingbufEvicted.Inc() }
 func (OTelRingbufObserver) SetOldestAgeSeconds(s float64) { OTelRingbufOldestAgeSeconds.Set(s) }
 
 // ReplicationObserver extends MetricsObserver with SetQueueDepth so the

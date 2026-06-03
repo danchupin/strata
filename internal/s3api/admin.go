@@ -72,6 +72,15 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request, sub string)
 		default:
 			writeError(w, r, errAdminMethodNotAllowed)
 		}
+	case "reconcile":
+		switch r.Method {
+		case http.MethodPost:
+			s.adminReconcile(w, r)
+		case http.MethodGet:
+			s.adminReconcileStatus(w, r)
+		default:
+			writeError(w, r, errAdminMethodNotAllowed)
+		}
 	default:
 		writeError(w, r, ErrNotImplemented)
 	}
@@ -246,16 +255,16 @@ func (s *Server) replicateRetry(r *http.Request, b *meta.Bucket) (scanned, reque
 }
 
 type adminBucketInspectResponse struct {
-	Name              string                 `json:"name"`
-	ID                string                 `json:"id"`
-	Owner             string                 `json:"owner"`
-	CreatedAt         time.Time              `json:"created_at"`
-	DefaultClass      string                 `json:"default_class"`
-	Versioning        string                 `json:"versioning,omitempty"`
-	ACL               string                 `json:"acl,omitempty"`
-	ObjectLockEnabled bool                   `json:"object_lock_enabled"`
-	Region            string                 `json:"region,omitempty"`
-	MfaDelete         string                 `json:"mfa_delete,omitempty"`
+	Name              string                     `json:"name"`
+	ID                string                     `json:"id"`
+	Owner             string                     `json:"owner"`
+	CreatedAt         time.Time                  `json:"created_at"`
+	DefaultClass      string                     `json:"default_class"`
+	Versioning        string                     `json:"versioning,omitempty"`
+	ACL               string                     `json:"acl,omitempty"`
+	ObjectLockEnabled bool                       `json:"object_lock_enabled"`
+	Region            string                     `json:"region,omitempty"`
+	MfaDelete         string                     `json:"mfa_delete,omitempty"`
 	Configs           map[string]json.RawMessage `json:"configs,omitempty"`
 }
 
@@ -434,6 +443,151 @@ func (s *Server) adminBucketReshardStatus(w http.ResponseWriter, r *http.Request
 		State:   state,
 		LastKey: job.LastKey,
 	})
+}
+
+// adminReconcileResponse is the reconcile-job payload returned by both the
+// POST (queue) and GET (status) handlers (US-002 metadata-data-reconcile).
+type adminReconcileResponse struct {
+	OK            bool   `json:"ok"`
+	ID            string `json:"id"`
+	Cluster       string `json:"cluster"`
+	Pool          string `json:"pool"`
+	Namespace     string `json:"namespace,omitempty"`
+	Bucket        string `json:"bucket,omitempty"`
+	Policy        string `json:"policy"`
+	State         string `json:"state"`
+	Cursor        string `json:"cursor,omitempty"`
+	Scanned       int64  `json:"scanned"`
+	OrphansFound   int64 `json:"orphans_found"`
+	OrphansGC      int64 `json:"orphans_gc"`
+	OrphansReport  int64 `json:"orphans_report"`
+	OrphansRestore int64 `json:"orphans_restore"`
+	AbsentBackref  int64 `json:"absent_backref"`
+	// Dangling-pass (US-003) counters.
+	ManifestsScanned   int64  `json:"manifests_scanned"`
+	Healthy            int64  `json:"healthy"`
+	DanglingFound      int64  `json:"dangling_found"`
+	DanglingQuarantine int64  `json:"dangling_quarantine"`
+	DanglingReport     int64  `json:"dangling_report"`
+	DanglingDelete     int64  `json:"dangling_delete"`
+	Errors             int64  `json:"errors"`
+	Message            string `json:"message,omitempty"`
+}
+
+// adminReconcile queues a data-tier reconcile pass and returns immediately
+// (202 Accepted) with a job id. The pass is driven asynchronously by the
+// leader-elected `reconcile` worker (cmd/strata/workers/reconcile.go) — a
+// live-cluster scan must not block the HTTP request. Operators poll progress
+// via GET /admin/reconcile?id=<id>. Enable the worker with
+// STRATA_WORKERS=...,reconcile on at least one replica.
+//
+// Two directions, selected by the bucket param:
+//   - ORPHAN pass (US-002, data->meta): bucket absent. Params: cluster
+//     (required), pool (required), namespace (optional — default namespace;
+//     \x01 for all namespaces), policy (report|gc|restore, default report).
+//     restore (US-002b) rebuilds the manifest row from the back-reference for a
+//     genuinely-absent version (plaintext-only; gaps + SSE reported, never
+//     served).
+//   - DANGLING pass (US-003, meta->data): bucket=<name> present. Walks the
+//     bucket's manifests and probes each chunk; policy (report|quarantine|
+//     delete, default report). delete (US-003b) GCs the version's chunks and
+//     removes the row. cluster/pool are not required.
+func (s *Server) adminReconcile(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	bucketName := q.Get("bucket")
+	policy := q.Get("policy")
+	if policy == "" {
+		policy = meta.ReconcilePolicyReport
+	}
+
+	var (
+		cluster, pool, namespace string
+		bucketID                 string
+		auditResource            string
+	)
+	if bucketName != "" {
+		// Dangling pass: resolve the bucket name to its UUID for the worker.
+		b, err := s.Meta.GetBucket(r.Context(), bucketName)
+		if err != nil {
+			mapMetaErr(w, r, err)
+			return
+		}
+		bucketID = b.ID.String()
+		auditResource = "bucket:" + bucketName
+	} else {
+		cluster = q.Get("cluster")
+		pool = q.Get("pool")
+		if cluster == "" || pool == "" {
+			writeError(w, r, APIError{
+				Code:    "InvalidArgument",
+				Message: "cluster and pool are required (or pass bucket= for a dangling-manifest pass)",
+				Status:  http.StatusBadRequest,
+			})
+			return
+		}
+		namespace = q.Get("namespace")
+		auditResource = "cluster:" + cluster + "/" + pool
+	}
+
+	job, err := s.Meta.StartReconcile(r.Context(), cluster, pool, namespace, bucketID, policy)
+	if err != nil {
+		if errors.Is(err, meta.ErrReconcileInvalidPolicy) {
+			writeError(w, r, APIError{Code: "InvalidArgument", Message: err.Error(), Status: http.StatusBadRequest})
+			return
+		}
+		mapMetaErr(w, r, err)
+		return
+	}
+	SetAuditOverride(r.Context(), "admin:Reconcile", auditResource, "", principalFromContext(r))
+	writeAdminJSON(w, http.StatusAccepted, reconcileResponse(job))
+}
+
+// adminReconcileStatus reads a reconcile job by id so operators can watch a
+// pass converge and read the post-run orphan/dangling summary.
+func (s *Server) adminReconcileStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		writeError(w, r, ErrInvalidArgument)
+		return
+	}
+	job, err := s.Meta.GetReconcileJob(r.Context(), id)
+	if errors.Is(err, meta.ErrReconcileNotFound) {
+		writeError(w, r, APIError{Code: "NoSuchReconcileJob", Message: "no reconcile job with that id", Status: http.StatusNotFound})
+		return
+	}
+	if err != nil {
+		mapMetaErr(w, r, err)
+		return
+	}
+	writeAdminJSON(w, http.StatusOK, reconcileResponse(job))
+}
+
+func reconcileResponse(job *meta.ReconcileJob) adminReconcileResponse {
+	return adminReconcileResponse{
+		OK:                 true,
+		ID:                 job.ID,
+		Cluster:            job.Cluster,
+		Pool:               job.Pool,
+		Namespace:          job.Namespace,
+		Bucket:             job.Bucket,
+		Policy:             job.Policy,
+		State:              job.State,
+		Cursor:             job.Cursor,
+		Scanned:            job.Scanned,
+		OrphansFound:       job.OrphansFound,
+		OrphansGC:          job.OrphansGC,
+		OrphansReport:      job.OrphansReport,
+		OrphansRestore:     job.OrphansRestore,
+		AbsentBackref:      job.AbsentBackref,
+		ManifestsScanned:   job.ManifestsScanned,
+		Healthy:            job.Healthy,
+		DanglingFound:      job.DanglingFound,
+		DanglingQuarantine: job.DanglingQuarantine,
+		DanglingReport:     job.DanglingReport,
+		DanglingDelete:     job.DanglingDelete,
+		Errors:             job.Errors,
+		Message:            job.Message,
+	}
 }
 
 func writeAdminJSON(w http.ResponseWriter, status int, body any) {

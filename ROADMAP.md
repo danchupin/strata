@@ -635,6 +635,74 @@ Non-goals:
 
 ## Known latent bugs
 
+- ~~**P2 — Multipart-origin chunks carry no back-reference (US-001 split).**~~ — **Done.** US-001b. Approach:
+  a Complete-time re-stamp pass (NOT carrying upload identity in part xattrs). Part chunks still land
+  un-stamped at UploadPart / UploadPartCopy (the object `version_id` is not yet minted); once
+  CompleteMultipartUpload sets `obj.VersionID` + `obj.Mtime` in place, the gateway
+  (`completeMultipart` → `stampMultipartBackref`) reads them back — so the stamped `version_id` matches the
+  stored meta row regardless of backend version policy — and re-stamps every chunk of the assembled manifest
+  via the new optional `data.BackrefStamper`. `ChunkIdx` is assigned by position in `m.Chunks` (the GLOBAL
+  order across concatenated parts) so `reconcile.OrderChunks` / rebuild see a contiguous `0..n-1`. RADOS leg
+  (`cephimpl.StampBackref`) rewrites the `user.strata.backref` xattr per OID; S3-passthrough leg
+  (`s3.Backend.StampBackref`) HEAD-then-CopyObject-REPLACE rewrites `x-amz-meta-strata-backref`. Round-trip
+  trade-off: one SetXattr (RADOS) / HEAD+COPY (S3) per chunk, run at Complete — NOT on the UploadPart hot path.
+  Best-effort: the manifest is already durable, so a stamp failure leaves chunks recoverable-degraded
+  (reconcile counts `AbsentBackref`, never deletes), never corrupts the object or fails the request. Memory
+  backend no-ops (does not implement `BackrefStamper`). SSE objects: the re-stamp carries `mu.SSE` as the
+  algorithm label so rebuild reports them unrecoverable (no key material). (`ralph/metadata-data-reconcile` US-001b)
+- ~~**P3 — Reconcile `restore` policy + S3-passthrough chunk scanner deferred (US-002 split).**~~ — **Done.**
+  US-002b. `meta.IsValidReconcilePolicy` now accepts `restore`; the reconcile worker resolves an orphan under
+  `restore` by rebuilding the manifest row from the back-reference — it accumulates orphan chunks during the scan,
+  groups them by `{bucket_id, key, version_id}` via the now-shared `reconcile.OrderChunks` (US-004 `rebuild.go`
+  delegates to it — one gap-detection rule), orders by `chunk_idx`, recomputes the single-part ETag + per-chunk
+  CRC32C from the rebuilt bytes (`reconcile.Config.Data` reads them), and sets `IsLatest` by back-reference `mtime`.
+  Safety rails identical to `rebuild-index`: restore writes ONLY when the version row is genuinely absent (an
+  overwritten version — row present, references a different OID — is reported, NEVER clobbered), a gapped sequence is
+  reported (never stitched short), an SSE object is reported unrecoverable (plaintext-only). Idempotent (a re-run sees
+  the rebuilt chunk as healthy). New `ReconcileJob.OrphansRestore` counter (memory/TiKV/Cassandra lockstep, additive
+  `orphans_restore` column + ALTER) + `resolution=restore` on `strata_reconcile_orphans_found_total`; surfaced in the
+  web console (orphan policy picker + "Restored" summary counter). S3-passthrough scanner: new `data.ChunkLister`
+  capability (`s3.Backend.ListChunks` — native `ListObjectsV2` + per-object `x-amz-meta-strata-backref` HEAD,
+  resumable via `StartAfter`) driven by `reconcile.S3Scanner`; the worker picks S3Scanner vs RADOSScanner by backend
+  capability. Memory red/green proven; RADOS + S3 real-backend legs are integration-only. (`ralph/metadata-data-reconcile` US-002b)
+- **P3 — Reconcile `restore` crash-resume can defer a version whose chunks straddle the checkpoint cursor.** The
+  restore accumulator (`reconcile.runJob`) is in-memory and rebuilt empty on each pass, so a crash-resumed restore
+  (scan restarts at `job.Cursor`) only accumulates chunks at-or-after the watermark. A multi-chunk version split across
+  the persisted cursor looks gapped on resume and is REPORTED (not restored). This is **fail-safe** — it never stitches
+  a short object and the chunks stay orphans for a later pass — but a crashed restore may need a full re-run
+  (`cursor=""`) to rebuild a straddling version, so the "resumable from a Cursor watermark" guarantee is weaker for
+  `restore` than for `report`/`gc`. Fix direction: persist the accumulator, order the scan so a version's chunks are
+  contiguous, or only resolve groups whose `chunk_idx=0` was seen this pass. (`ralph/metadata-data-reconcile` US-002b)
+- ~~**P3 — Reconcile dangling-manifest `delete` resolution + RADOS/S3 chunk prober deferred (US-003 split).**~~ —
+  **Done.** `meta.IsValidDanglingPolicy` now accepts `delete`: a bucket-scoped dangling job under the `delete` policy
+  enqueues the version's manifest chunks for GC (GC-before-row-delete order — a crash leaves chunks queued rather than
+  orphaning live chunks; the `_by_cluster` dual-write stays in lockstep; GC dedups by OID so a re-run never
+  double-deletes) then removes the object-version row via `DeleteObject` (the concrete version id, incl. the
+  null-version sentinel). The real chunk probers ship: `cephimpl.ChunkExists` (per-OID rados `Stat`, ENOENT→absent)
+  and `s3.Backend.ChunkExists` (native `HEAD`, 404→absent), both behind `data.ChunkStater` and rate-limited via
+  `STRATA_RECONCILE_SCAN_RATE` (`rateLimitedProber` in the worker wiring); `classifyDangling` now also probes the S3
+  passthrough single backing object (BackendRef manifests). A probe error still counts an error and never
+  flags/deletes a healthy object. New `dangling_delete` counter (3-backend lockstep, additive Cassandra column),
+  surfaced in the admin API + web console. RADOS + S3 legs are integration-tested
+  (`cephimpl/reconcile_integration_test.go`; the S3 leg is unit-tested via the RoundTripper harness).
+  (commit `52c0ec4`) (`ralph/metadata-data-reconcile` US-003b)
+- ~~**P2 — `rebuild-index` SSE-algo stamping at PUT + RADOS end-to-end integration deferred (US-004 split).**~~ —
+  **Done.** Shipped via `ralph/metadata-data-reconcile` US-004b. Both split pieces landed. (1) **SSE-algo
+  STAMPING at PUT** — the gateway now populates `BackrefAttrs.SSEAlgo` from the chosen SSE disposition:
+  `putObject` from the resolved `sse` label, `copyObject` from `srcObj.SSE` (copy performs no gateway
+  re-encryption, so the dst chunks inherit the source's ciphertext-ness). The RADOS (`cephimpl.PutChunks`
+  inline-PUT leg) + S3-passthrough (`s3.Backend.PutChunks`) backends thread `a.SSEAlgo` into the stamped
+  back-reference (xattr / `x-amz-meta`) — algorithm LABEL only, never key material (the multipart re-stamp +
+  both `StampBackref` legs already carried it). An SSE object is now reported unrecoverable instead of rebuilt
+  with a wrong ciphertext ETag. (2) **RADOS per-chunk Size** — `rados.EnumerateOptions.WithSize` makes the
+  cephimpl enumerator `Stat` each chunk inline (one extra rados Stat riding the same ioctx, ENOENT→size 0) and
+  surface it on `PoolObject.Size`; `reconcile.RADOSScanner` sets `WithSize` and populates `ScannedChunk.Size`,
+  so `rebuild.readChunk` / `restore.readChunkBytes` range-read the right byte count (Size=0 would have
+  zero-read every chunk → md5("") ETags). Red/green proof on a live cluster:
+  `cephimpl/rebuild_integration_test.go::TestRebuildIndexFromRADOS` seeds a non-SSE bucket (two versions),
+  wipes meta rows, runs the engine over the real `RADOSScanner` → both versions GET-able with exact
+  bytes/size + the later-mtime version `IsLatest`; an SSE-labelled object → `StatusUnrecoverableSSE` (no row
+  written); a removed middle chunk → `StatusGapped` (never stitched short). (commit `1a4f1af`)
 - **P2 — Cassandra reshard migration vs a concurrent specific-version DELETE can resurrect that version.** The US-003
   reshard mover (`MigrateReshardKey`) copies a key's rows source→target then deletes the source orphan (copy-first, so
   the US-002 union read never sees a gap). A client `DELETE ?versionId=v` landing AFTER the mover's source read but

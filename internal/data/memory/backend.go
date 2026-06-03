@@ -24,6 +24,11 @@ func New() *Backend {
 	return &Backend{chunks: make(map[string][]byte)}
 }
 
+// PutChunks ignores the chunk back-reference (US-001 metadata-data-reconcile)
+// on ctx: back-references are a data-tier-durability concept (RADOS xattr /
+// S3 object metadata) so a reconcile / rebuild can run from data alone. The
+// in-memory backend holds chunks in a process-local map with no persistence
+// to reconcile, so it is a deliberate no-op.
 func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*data.Manifest, error) {
 	if class == "" {
 		class = "STANDARD"
@@ -95,6 +100,17 @@ func (b *Backend) Delete(ctx context.Context, m *data.Manifest) error {
 }
 
 func (b *Backend) Close() error { return nil }
+
+// ChunkExists implements data.ChunkStater: reports whether the chunk OID is
+// held by the backend. Drives the reconcile dangling-manifest pass (US-003).
+func (b *Backend) ChunkExists(ctx context.Context, ref data.ChunkRef) (bool, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	_, ok := b.chunks[ref.OID]
+	return ok, nil
+}
+
+var _ data.ChunkStater = (*Backend)(nil)
 
 // ClusterECCapability satisfies data.ClusterECCapability. The memory
 // backend has no underlying erasure-coded pool, so every cluster is

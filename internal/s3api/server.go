@@ -1042,7 +1042,20 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		encReader = newSSEEncryptingReader(body, dek, key)
 		body = encReader
 	}
-	m, err := s.Data.PutChunks(s.dataCtxForPut(ctx, b, key), body, class)
+	// Decide version_id + mtime BEFORE PutChunks so the chunk
+	// back-reference (US-001) carries the SAME version_id the meta store
+	// will record, and pre-set them on the Object below so the two tiers
+	// agree. Only an Enabled bucket mints a real TimeUUID; Disabled and
+	// Suspended both collapse to NullVersionID (Suspended via IsNull
+	// below), matching PutObject's own resolution.
+	putMtime := time.Now().UTC()
+	versionID := meta.NullVersionID
+	if b.Versioning == meta.VersioningEnabled {
+		versionID = meta.NewVersionID()
+	}
+	putCtx := data.WithBackref(s.dataCtxForPut(ctx, b, key),
+		data.BackrefAttrs{BucketID: b.ID, Key: key, VersionID: versionID, Mtime: putMtime, SSEAlgo: sse})
+	m, err := s.Data.PutChunks(putCtx, body, class)
 	if err != nil {
 		if errors.Is(err, auth.ErrSignatureInvalid) {
 			writeError(w, r, ErrSignatureDoesNotMatch)
@@ -1075,11 +1088,12 @@ func (s *Server) putObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 	obj := &meta.Object{
 		BucketID:     b.ID,
 		Key:          key,
+		VersionID:    versionID,
 		Size:         objSize,
 		ETag:         objETag,
 		ContentType:  r.Header.Get("Content-Type"),
 		StorageClass: m.Class,
-		Mtime:        time.Now().UTC(),
+		Mtime:        putMtime,
 		Manifest:     m,
 		Checksums:    sums,
 		SSE:          sse,
@@ -1171,6 +1185,14 @@ func (s *Server) getObject(w http.ResponseWriter, r *http.Request, b *meta.Bucke
 		w.Header().Set("Last-Modified", o.Mtime.UTC().Format(http.TimeFormat))
 		w.Header().Set("Allow", "DELETE")
 		writeError(w, r, ErrMethodNotAllowed)
+		return
+	}
+	if o.QuarantineReason != "" {
+		// US-003: the reconcile dangling-manifest pass marked this version
+		// unreadable (a referenced data chunk is missing). Return a clear
+		// error on both GET and HEAD instead of a silent corrupt 5xx from
+		// GetChunks — getObject serves both.
+		writeError(w, r, ErrObjectQuarantined)
 		return
 	}
 	partNumberStr := q.Get("partNumber")

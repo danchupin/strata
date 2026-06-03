@@ -13,6 +13,67 @@ type Backend interface {
 	Close() error
 }
 
+// ChunkStater is the optional capability a data backend advertises to answer
+// "does this chunk OID still exist in the data tier?". The reconcile worker's
+// dangling-manifest pass (US-003, meta->data) probes every manifest-referenced
+// chunk through it: a manifest whose chunk is missing is dangling. Backends
+// that cannot answer cheaply do not implement it; the reconcile worker then
+// records that the probe is unsupported and quarantines nothing (it must never
+// flag a healthy object dangling on a probe it could not run). The memory
+// backend implements it directly; the RADOS leg (a per-OID stat) is the
+// trailing US-003b split.
+type ChunkStater interface {
+	ChunkExists(ctx context.Context, ref ChunkRef) (bool, error)
+}
+
+// ListedChunk is one data-tier chunk surfaced by ChunkLister: its OID, byte
+// size, and raw (still-encoded) US-001 back-reference payload — empty when the
+// backing object carries none (legacy / STRATA_CHUNK_BACKREF=false). The
+// reconcile worker decodes Backref itself so a malformed payload degrades to
+// "no back-reference" rather than aborting the walk.
+type ListedChunk struct {
+	OID     string
+	Size    int64
+	Backref []byte
+}
+
+// ChunkLister is the optional capability a data backend advertises to enumerate
+// its chunks WITHOUT a pool-enumeration primitive — the S3-passthrough backend
+// implements it via a native ListObjects over its backing bucket plus a
+// per-object metadata read of x-amz-meta-strata-backref (US-002b). The RADOS
+// backend does NOT implement it (it uses the US-000 EnumeratePool primitive via
+// reconcile.RADOSScanner instead); the reconcile worker type-asserts the live
+// backend and picks reconcile.S3Scanner when this surface is present.
+//
+// List visits each chunk in the scope, handing visit a resume cursor pointing
+// at-or-after that chunk so the worker can persist + resume the walk. startCursor
+// "" starts from the front. The implementation decodes the opaque string into
+// its native continuation token.
+type ChunkLister interface {
+	ListChunks(ctx context.Context, cluster, class, startCursor string, visit func(ListedChunk, string) error) error
+}
+
+// BackrefStamper is the optional capability a data backend advertises to
+// (re)write the US-001 self-describing chunk back-reference on the chunks of
+// an ALREADY-written manifest. The gateway uses it at CompleteMultipartUpload
+// (US-001b): a multipart part's chunks are written at UploadPart time — before
+// the final object {version_id, global chunk index} exists — so they land with
+// NO back-reference. Once Complete mints the object identity, the gateway walks
+// the assembled manifest and stamps every chunk, assigning ChunkIdx by position
+// in m.Chunks (the global order across concatenated parts) so the rebuild
+// engine's contiguous-0..n-1 ordering holds.
+//
+// Best-effort at the call site: the manifest is already durable when Stamp runs,
+// so a failure leaves chunks recoverable-degraded (reconcile counts them
+// AbsentBackref and never deletes them) — it MUST NOT corrupt the completed
+// object or fail the request. Backends that cannot stamp cheaply do not
+// implement it (memory no-ops by absence); the RADOS leg rewrites the
+// BackrefXattrName xattr per OID, the S3-passthrough leg rewrites the
+// x-amz-meta-strata-backref user-metadata on the backing object.
+type BackrefStamper interface {
+	StampBackref(ctx context.Context, m *Manifest, attrs BackrefAttrs) error
+}
+
 // MultipartBackend is the optional capability surface for data backends that
 // can map a Strata multipart upload 1:1 onto their own multipart protocol
 // (US-010 S3-over-S3). Today only the s3 backend implements it; the gateway
@@ -131,10 +192,10 @@ type DataHealthReport struct {
 // bucket lives on; rendered empty for the memory backend (single virtual
 // cluster).
 type PoolStatus struct {
-	Name        string `json:"name"`
-	Class       string `json:"class"`
-	Cluster     string `json:"cluster,omitempty"`
-	BytesUsed   uint64 `json:"bytes_used"`
+	Name      string `json:"name"`
+	Class     string `json:"class"`
+	Cluster   string `json:"cluster,omitempty"`
+	BytesUsed uint64 `json:"bytes_used"`
 	// ChunkCount is the count of RADOS chunks (each chunk is up to 4 MiB);
 	// it is NOT the count of S3 objects. A single 5 MiB S3 object spans
 	// two chunks; the UI column header carries a tooltip explaining the

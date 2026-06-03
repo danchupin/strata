@@ -796,12 +796,14 @@ func (s *Store) PutObject(ctx context.Context, o *meta.Object, versioned bool) e
 		`INSERT INTO objects (bucket_id, shard, key, version_id, is_latest, is_delete_marker,
 		 size, etag, content_type, storage_class, mtime, manifest, user_meta, tags,
 		 retain_until, retain_mode, legal_hold, checksums, sse, ssec_key_md5, restore_status,
-		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 cache_control, expires, parts_count, sse_key, sse_key_id, replication_status, part_sizes, checksum_type, is_null,
+		 quarantine_reason)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		gocqlUUID(o.BucketID), shard, o.Key, versionID, true, o.IsDeleteMarker,
 		o.Size, o.ETag, o.ContentType, o.StorageClass, o.Mtime, manifestBlob, o.UserMeta, o.Tags,
 		retainUntil, nilIfEmpty(o.RetainMode), o.LegalHold, o.Checksums, nilIfEmpty(o.SSE), nilIfEmpty(o.SSECKeyMD5), nilIfEmpty(o.RestoreStatus),
 		nilIfEmpty(o.CacheControl), nilIfEmpty(o.Expires), partsCount, nilIfEmptyBytes(o.SSEKey), nilIfEmpty(o.SSEKeyID), nilIfEmpty(o.ReplicationStatus), partSizes, nilIfEmpty(o.ChecksumType), o.IsNull,
+		nilIfEmpty(o.QuarantineReason),
 	).WithContext(ctx).Exec(); err != nil {
 		return err
 	}
@@ -952,11 +954,13 @@ func scanObjectQuery(q *gocql.Query, bucketID uuid.UUID, key string) (*meta.Obje
 		partSizes    []int64
 		checksumType string
 		isNull       bool
+		quarantine   string
 	)
 	err := q.Scan(&versionUUID, &isLatest, &isDeleteMark, &size, &etag, &ctype,
 		&class, &mtime, &manifestBlob, &userMeta, &tags,
 		&retainUntil, &retainMode, &legalHold, &checksums, &sse, &ssecKeyMD5, &restore,
-		&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull)
+		&cacheControl, &expires, &partsCount, &sseKey, &sseKeyID, &replication, &partSizes, &checksumType, &isNull,
+		&quarantine)
 	if errors.Is(err, gocql.ErrNotFound) {
 		return nil, meta.ErrObjectNotFound
 	}
@@ -997,6 +1001,7 @@ func scanObjectQuery(q *gocql.Query, bucketID uuid.UUID, key string) (*meta.Obje
 		PartSizes:         partSizes,
 		ReplicationStatus: replication,
 		ChecksumType:      checksumType,
+		QuarantineReason:  quarantine,
 	}, nil
 }
 
@@ -2988,6 +2993,19 @@ func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, 
 	return s.s.Query(
 		`UPDATE objects SET restore_status=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
 		nilIfEmpty(status), gocqlUUID(bucketID), shard, key, v,
+	).WithContext(ctx).Exec()
+}
+
+// SetObjectQuarantine sets (reason != "") or clears (reason == "") the object
+// version's quarantine_reason (US-003 dangling-manifest pass).
+func (s *Store) SetObjectQuarantine(ctx context.Context, bucketID uuid.UUID, key, versionID, reason string) error {
+	v, shard, err := s.resolveVersionID(ctx, bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	return s.s.Query(
+		`UPDATE objects SET quarantine_reason=? WHERE bucket_id=? AND shard=? AND key=? AND version_id=?`,
+		nilIfEmpty(reason), gocqlUUID(bucketID), shard, key, v,
 	).WithContext(ctx).Exec()
 }
 

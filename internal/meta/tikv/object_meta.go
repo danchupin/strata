@@ -147,6 +147,18 @@ func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, 
 	})
 }
 
+// SetObjectQuarantine sets (reason != "") or clears (reason == "") the object
+// row's QuarantineReason (US-003 dangling-manifest pass). Returns
+// meta.ErrObjectNotFound when the row is absent.
+func (s *Store) SetObjectQuarantine(ctx context.Context, bucketID uuid.UUID, key, versionID, reason string) (err error) {
+	ctx, finish := s.observer.Start(ctx, "SetObjectQuarantine", "objects")
+	defer func() { finish(err) }()
+	versionID = meta.ResolveVersionID(versionID)
+	return s.mutateObjectRow(ctx, bucketID, key, versionID, func(row *objectRow) {
+		row.QuarantineReason = reason
+	})
+}
+
 // mutateObjectRow is the shared RMW helper: pessimistic txn, lock + Get the
 // addressed row, decode to objectRow, apply mutate, re-encode, Set, Commit.
 // Mutates against the JSON row directly so callers can touch fields

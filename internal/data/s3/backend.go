@@ -17,6 +17,7 @@ package s3
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -88,6 +89,14 @@ type Backend struct {
 	// (US-001 cycle B prod-observability). Threaded onto the
 	// per-cluster smithy middleware in connFor.
 	apiMetrics APIMetrics
+
+	// backref stamps the chunk back-reference (US-001
+	// metadata-data-reconcile) as x-amz-meta-strata-backref user-metadata
+	// on the backing object. Read once at New from STRATA_CHUNK_BACKREF
+	// (default on). The S3-passthrough backend reconciles via its native
+	// ListObjects, so the pointer rides the backing object's metadata
+	// rather than an xattr; one backing object per PutChunks → ChunkIdx 0.
+	backref bool
 }
 
 // s3Cluster carries the per-cluster SDK wiring + resolved config knobs.
@@ -233,6 +242,7 @@ func New(cfg Config) (*Backend, error) {
 		tracerProvider: resolveTracerProvider(cfg),
 		tlsDefault:     cfg.TLS,
 		apiMetrics:     cfg.APIMetrics,
+		backref:        data.BackrefEnabledFromEnv(),
 	}
 	for id, spec := range cfg.Clusters {
 		spec.ID = id
@@ -1069,6 +1079,21 @@ func (b *Backend) PutChunks(ctx context.Context, r io.Reader, class string) (*da
 		Body:   cr,
 	}
 	c.applyPutSSE(in)
+	if b.backref {
+		if a, ok := data.BackrefFromContext(ctx); ok {
+			enc := data.EncodeBackref(data.Backref{
+				BucketID:  a.BucketID,
+				Key:       a.Key,
+				VersionID: a.VersionID,
+				ChunkIdx:  0,
+				Mtime:     a.Mtime,
+				SSEAlgo:   a.SSEAlgo,
+			})
+			in.Metadata = map[string]string{
+				data.BackrefMetaKey: base64.StdEncoding.EncodeToString(enc),
+			}
+		}
+	}
 	upCtx, cancel := uploadCtxFor(ctx, c.multipartTimeout)
 	defer cancel()
 	out, err := c.uploader.Upload(upCtx, in)

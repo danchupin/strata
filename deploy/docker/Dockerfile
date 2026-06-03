@@ -26,7 +26,7 @@ RUN printf '%s\n' \
         librados-devel librbd-devel \
  && dnf clean all
 
-ARG GOVERSION=1.25.10
+ARG GOVERSION=1.25.11
 RUN ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/') \
  && curl -fsSL "https://go.dev/dl/go${GOVERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xzf - \
  && ln -sf /usr/local/go/bin/go /usr/local/bin/go \

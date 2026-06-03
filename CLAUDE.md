@@ -131,8 +131,56 @@ nginx LB `:9999` round-robins; direct ports `:10001`/`:10002`. `make up-cassandr
                   (queued|running|idle). Idempotent + resumable from the job
                   `LastKey` watermark (crash-safe). Cassandra moves rows;
                   memory/TiKV immediate-complete no-op.
+  reconcile    -> data-tier orphan-chunk detection after a restore (US-002
+                  metadata-data-reconcile). `--workers=reconcile`,
+                  `reconcile-leader` lease. `POST /admin/reconcile` QUEUES a
+                  job (202, async, `admin:Reconcile`); `GET /admin/reconcile
+                  ?id=` reads progress. Walks the RADOS pool via the US-000
+                  enumeration primitive (`reconcile.RADOSScanner`), reads each
+                  chunk's US-001 back-reference, looks up the owner in meta,
+                  resolves orphans by policy (report DEFAULT / gc / restore).
+                  restore (US-002b) rebuilds the manifest row from the
+                  back-reference for a genuinely-absent version (reuses the
+                  US-004 grouping via shared `reconcile.OrderChunks`; recomputes
+                  ETag from `Config.Data` bytes; IsLatest by mtime) — overwritten
+                  versions + gaps reported (never clobbered/stitched), SSE
+                  reported unrecoverable. Idempotent + resumable from a `Cursor`
+                  watermark (restore's straddling-version resume caveat: ROADMAP
+                  Known latent bugs).
+                  US-003 adds the inverse DANGLING pass (meta→data): a
+                  bucket-scoped job (`POST /admin/reconcile?bucket=&policy=`)
+                  walks every object version's manifest and probes each chunk
+                  via `reconcile.ChunkProber` (`data.ChunkStater`); a manifest
+                  with a missing chunk is resolved report (count) / quarantine
+                  (mark object unreadable → GET/HEAD 503 `ObjectQuarantined`,
+                  never a silent corrupt 5xx). delete + RADOS/S3 prober → US-003b.
   strata admin rewrap -> one-shot SSE master-key rotation. Rewraps DEKs to
                   --target-key-id. Idempotent + resumable via rewrap_progress.
+  strata admin rebuild-index -> LAST-RESORT manifest-index rebuild from a
+                  data-tier scan (US-004 metadata-data-reconcile). Subcommand
+                  (single-binary), connects directly to meta + data (mirrors
+                  rewrap), NOT the gateway HTTP surface. internal/rebuild engine:
+                  scans the pool via reconcile.ChunkScanner (RADOSScanner →
+                  US-000 EnumeratePool), groups chunks by US-001 back-reference
+                  {bucket_id,key,version_id}, orders by chunk_idx, gap-detects
+                  (missing idx → version flagged gapped, NEVER stitched short +
+                  served), recomputes single-part ETag (MD5) + per-chunk CRC32C
+                  from rebuilt bytes, sets IsLatest by back-reference mtime
+                  (correct across a Suspended-null version), refuses to clobber a
+                  live manifest unless --force, --dry-run reports only,
+                  --bucket-id filters one bucket. PLAINTEXT-ONLY: a chunk whose
+                  back-reference SSEAlgo!="" → reported unrecoverable, NEVER
+                  written (wrapped DEK was in the lost meta). Lost metadata
+                  (Content-Type/user-meta/tags/ACL/storage-class) reported lost,
+                  not fabricated. SSE-algo STAMPING at PUT + the RADOS per-chunk
+                  size probe shipped in US-004b: the gateway populates
+                  BackrefAttrs.SSEAlgo (putObject from the resolved sse label,
+                  copyObject from srcObj.SSE) and RADOS/S3 PutChunks thread it
+                  into the stamped back-reference; rados.EnumerateOptions.WithSize
+                  stats each chunk inline so RADOSScanner surfaces PoolObject.Size
+                  (rebuild range-reads the right byte count — Size=0 would
+                  zero-read). Real-RADOS red/green:
+                  cephimpl/rebuild_integration_test.go.
 ```
 
 The S3 router is in `internal/s3api/server.go`. Bucket-scoped queries (`?cors`, `?policy`, `?lifecycle`, …) dispatch via
@@ -169,6 +217,153 @@ helpers used by cephimpl (`PutChunksParallel` + `ChunkPutFn`,
 files (`data_rados_ceph.go` + `data_rados_stub.go`,
 `bench_rados_ceph.go` + `bench_rados_stub.go`) that either delegate to
 `cephimpl.New` or return the not-compiled sentinel.
+
+**Pool object-enumeration primitive (US-000 metadata-data-reconcile).** The
+reconcile/rebuild tooling walks a RADOS pool directly (orphan-chunk +
+last-resort rebuild can ONLY be found by enumerating the pool, never via
+meta). Always-on shape in `internal/data/rados/enumerate.go`:
+`rados.EnumeratePool(ctx, backend, cluster, EnumerateOptions, PoolVisitor)`
+type-asserts the `data.Backend` to the `PoolEnumerator` interface and
+returns `data.ErrRADOSNotCompiled` when it is not the librados backend —
+same sentinel shape as `rados.New`, so default-tag builds stay
+go-ceph-free. The real impl is `(*cephimpl.Backend).EnumeratePool`
+(`cephimpl/enumerate.go`) wrapping go-ceph `ioctx.Iter()`
+(`rados_nobjects_list`): resumable from an `EnumerateCursor` (PG-hash
+position — resume is at-least-once / PG-granular, NEVER drops; callers dedup
+by OID against the meta set), ctx-cancellable, rate-limited via
+`rados.ScanLimiter` (token bucket, `STRATA_RECONCILE_SCAN_RATE` objects/sec
+via `rados.ScanRateFromEnv`, 0 = unlimited), and filtered to Strata chunk
+OIDs via `rados.IsChunkOID` / `ParseChunkOID` (a chunk OID is
+`<objID-uuid>.<>=5 decimal digits>` — the `fmt.Sprintf("%s.%05d", …)` PUT
+format). Namespace-aware: `EnumerateOptions.Namespace` empty = default ns,
+concrete = one class, `rados.EnumerateAllNamespaces` ("\x01" == librados
+`LIBRADOS_ALL_NSPACES`) = every namespace. `ScanLimiter` lives in the
+always-on main module (not cephimpl) so the go-ceph side needs no rate dep.
+
+**Chunk back-reference stamped at PUT (US-001 metadata-data-reconcile).**
+Every chunk written to the data tier carries a self-describing owner
+pointer so reconcile/rebuild can run from data alone. Payload shape +
+codec are always-on in `internal/data/backref.go`: `data.Backref{BucketID,
+Key, VersionID, ChunkIdx, Mtime, SSEAlgo}` ↔ `EncodeBackref`/`DecodeBackref`
+(compact versioned wire form, leading `BackrefSchemaV1` byte reserves room
+for a future refcount-aware multi-owner shape — content-addressed dedup
+ROADMAP P2). **Carries NO key material** (no plaintext, no wrapped DEK) —
+safe under SSE. `SSEAlgo` (US-004) is the encryption-algorithm LABEL only
+("AES256"/"aws:kms", empty for plaintext) so `rebuild-index` reports SSE
+objects unrecoverable instead of serving ciphertext; it is NOT key material.
+**SSEAlgo population (US-004b, done):** the gateway populates `BackrefAttrs.SSEAlgo`
+at PUT — `putObject` from the resolved `sse` disposition label, `copyObject` from
+`srcObj.SSE` (copy does no gateway re-encryption, so the dst chunks inherit the
+source's ciphertext-ness); RADOS (`cephimpl.PutChunks` inline leg) + S3-passthrough
+(`s3.Backend.PutChunks`) thread `a.SSEAlgo` into the stamped back-reference. **Mtime is
+REQUIRED** — version_id orders the chain but can't derive IsLatest when a
+suspended-null version (ts=0) coexists. The identity is threaded onto the
+data-plane ctx via `data.WithBackref`/`BackrefFromContext`; the gateway
+handler (`putObject` + `copyObject`) decides `version_id` + `mtime` BEFORE
+`PutChunks` (only `Enabled` buckets mint a real `meta.NewVersionID()` v1
+TimeUUID; Disabled/Suspended → `NullVersionID`) and pre-sets them on BOTH
+the ctx AND the `meta.Object` so the two tiers agree — that match is what
+reconcile (US-002) uses to pair a chunk with its manifest. RADOS leg:
+`(*cephimpl.Backend).PutChunks` stamps `data.BackrefXattrName`
+(`user.strata.backref`) in the SAME `WriteOp` as the body via
+`writeChunkBatched` (one Operate, no extra RTT; routes through the batched
+helper whenever a backref is present, regardless of `STRATA_RADOS_BATCH_OPS`).
+S3-passthrough leg: `s3.Backend.PutChunks` stamps the same payload (base64)
+as `x-amz-meta-strata-backref` user-metadata (one backing object per PUT →
+ChunkIdx 0; reconciles via native ListObjects, no pool-enumeration dep).
+Memory backend no-ops. On by default; opt out with `STRATA_CHUNK_BACKREF=false`
+(`data.BackrefEnabledFromEnv`, read once at backend New) → legacy no-xattr,
+reconcile/rebuild degrade gracefully. **Multipart-origin chunks are covered
+via a Complete-time re-stamp (US-001b).** Part chunks are written un-stamped at
+UploadPart/UploadPartCopy (the object version_id is not yet minted); once
+`CompleteMultipartUpload` sets `obj.VersionID`+`obj.Mtime` in place,
+`completeMultipart`→`stampMultipartBackref` reads them back (so the stamped
+version_id matches the stored row for ANY backend policy) and re-stamps every
+chunk of the assembled manifest through the optional `data.BackrefStamper`
+(`cephimpl.StampBackref` = per-OID SetXattr; `s3.Backend.StampBackref` =
+HEAD-then-CopyObject-REPLACE on `x-amz-meta-strata-backref`). `ChunkIdx` is
+assigned by position in `m.Chunks` (GLOBAL order across concatenated parts) so
+`reconcile.OrderChunks`/rebuild see a contiguous 0..n-1. Best-effort: a stamp
+failure leaves chunks recoverable-degraded (reconcile counts `AbsentBackref`,
+never deletes), never fails the completed upload. Memory no-ops (no
+`BackrefStamper`). Hot-path cost of the single-PUT leg (one SetXattr riding the
+existing WriteOp) is within bare-WriteFull p99 noise — see
+`docs/site/content/architecture/benchmarks/rados-ops.md`; the multipart re-stamp
+runs at Complete, NOT the UploadPart hot path.
+
+**Reconcile worker — orphan-chunk detection (US-002 metadata-data-reconcile).**
+A leader-elected `reconcile` worker (`internal/reconcile/` +
+`cmd/strata/workers/reconcile.go`) repairs RADOS↔meta divergence after a
+restore. Execution model mirrors reshard (US-005): the admin POST
+`/admin/reconcile?cluster=&pool=&namespace=&policy=` QUEUES a job
+(`meta.StartReconcile` → 202); the worker drains queued jobs out-of-band on a
+tick (`GET /admin/reconcile?id=` reads progress). Job queue is a NEW
+`meta.ReconcileJob` (NOT the inline-goroutine `AdminJob`) — mirror it across all
+three backends (`StartReconcile`/`GetReconcileJob`/`UpdateReconcileJob`/
+`ListReconcileJobs`; `ListReconcileJobs` returns only queued|running, the
+worker's drain set; done/error rows persist for status polling). Resumable from
+a per-job `Cursor` watermark persisted every `CheckpointEvery` chunks.
+**Data→meta orphan detection NEEDS the back-reference**: the meta tier is not
+indexed by OID, so the only way to attribute a pool chunk to an owner is to
+read its US-001 back-reference, then `GetObject(bucketID, key, versionID)` and
+check `Manifest.Chunks` for the OID. Healthy = manifest references it;
+orphan = object/bucket gone OR manifest no longer references the OID
+(overwritten/rolled-back version). **Policies: report (DEFAULT — never delete)
++ gc (enqueue via `EnqueueChunkDeletion`) + restore (US-002b — rebuild the
+manifest row from the back-reference).** restore needs `reconcile.Config.Data`
+(reads chunk bytes to recompute the ETag): it accumulates orphan chunks during
+the scan, groups by `{bucket,key,version}` via shared `reconcile.OrderChunks`
+(US-004 `rebuild.go` delegates to it), recomputes ETag+CRC, sets IsLatest by
+back-ref mtime. **Restore writes ONLY when the version row is genuinely absent**
+— an overwritten version (row present, references a different OID) is reported,
+NEVER clobbered; a gap is reported (never stitched short); an SSE object is
+reported unrecoverable (plaintext-only, same boundary as rebuild-index).
+Idempotent (a re-run sees the rebuilt chunk healthy). New `OrphansRestore`
+counter (3-backend lockstep, additive `orphans_restore` Cassandra column). A chunk with NO
+back-reference (`HasBackref=false`, legacy / `STRATA_CHUNK_BACKREF=false`) is
+counted (`AbsentBackref`) and reported, NEVER deleted — never destroy a chunk
+you can't attribute. The scan source is injected as a `reconcile.ChunkScanner`
+(`RADOSScanner` wraps `rados.EnumeratePool` with `WithBackref`, which surfaces
+the xattr inline via one GetXattr riding the same ioctx — `PoolObject.Backref`);
+tests inject a fake scanner so the classify/policy logic runs CI-green on the
+memory backend without RADOS. Metrics: `strata_reconcile_chunks_scanned_total`,
+`strata_reconcile_orphans_found_total{resolution}`,
+`strata_reconcile_errors_total` (+ add `reconcile` to
+`metrics.registeredWorkerNames`). Scan rate via `STRATA_RECONCILE_SCAN_RATE`
+(`rados.ScanRateFromEnv`, read in the data layer — koanf-exempt). **S3-passthrough
+scanner (US-002b):** new `data.ChunkLister` capability (`s3.Backend.ListChunks`
+— native `ListObjectsV2` + per-object `x-amz-meta-strata-backref` HEAD, resumable
+via `StartAfter`) driven by `reconcile.S3Scanner`; the worker
+(`cmd/strata/workers/reconcile.go::chunkScanner`) picks S3Scanner vs RADOSScanner
+by backend capability. RADOS + S3 real-backend legs are integration-only.
+
+**Reconcile worker — dangling-manifest detection (US-003 metadata-data-reconcile).**
+The INVERSE direction (meta→data): a manifest that points at a chunk the data
+tier no longer has — a restore left it broken; without this it surfaces only as
+a client 5xx. A reconcile job is now bidirectional, discriminated by
+`ReconcileJob.Bucket`: empty → the US-002 orphan pass (pool-scoped); non-empty
+(the bucket UUID string) → the dangling pass. Admin
+`POST /admin/reconcile?bucket=<name>&policy=` resolves the name→ID and queues a
+dangling job (cluster/pool unused). The worker (`runDanglingJob`) walks every
+object version via `ListObjectVersions` (paginated, resumable from `Cursor` =
+key marker) and probes each `Manifest.Chunks` OID through a
+`reconcile.ChunkProber` (mirrors `data.ChunkStater`, injected — the memory data
+backend implements it; the RADOS per-OID stat is US-003b, so a default-tag build
+gets a nil prober and the dangling job records an error + quarantines nothing,
+NEVER flagging a healthy object on a probe it could not run). A version with a
+missing chunk is dangling, resolved by policy: **report (DEFAULT — count only)
+or quarantine** (`SetObjectQuarantine` sets `Object.QuarantineReason`; the
+GET/HEAD path in `getObject` returns `503 ObjectQuarantined` instead of a silent
+corrupt 5xx from `GetChunks`). `meta.IsValidDanglingPolicy` gates report|quarantine
+(orphan jobs stay report|gc via `IsValidReconcilePolicy`) — `StartReconcile`
+picks by `bucket==""`. **Quarantine state rides a single `Object.QuarantineReason`
+column** (mirrors `RestoreStatus` — NOT the manifest blob, which is proto-encoded
+and would need protoc regen; NOT a hot-path filter) threaded through the objects
+SELECT projection + a dedicated `SetObjectQuarantine` UPDATE across all three
+backends. Counters on the job: `ManifestsScanned`/`Healthy`/`DanglingFound`/
+`DanglingQuarantine`/`DanglingReport` + a per-bucket summary log on clean drain.
+Metric `strata_reconcile_dangling_manifests_total{resolution}`. delete resolution
++ the RADOS/S3 real prober are SPLIT to US-003b.
 
 `cephimpl` exposes its own `RadosCluster` interface (structurally identical
 to `internal/rebalance.RadosCluster`) so it does NOT need to import

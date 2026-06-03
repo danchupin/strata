@@ -17,58 +17,59 @@ import (
 )
 
 type Store struct {
-	mu             sync.RWMutex
-	buckets        map[string]*meta.Bucket
-	objects        map[uuid.UUID]map[string][]*meta.Object
-	multiparts     map[uuid.UUID]map[string]*mpState
-	lifecycles     map[uuid.UUID][]byte
-	cors           map[uuid.UUID][]byte
-	policies       map[uuid.UUID][]byte
-	pab            map[uuid.UUID][]byte
-	ownership      map[uuid.UUID][]byte
-	encryption     map[uuid.UUID][]byte
-	objectLock     map[uuid.UUID][]byte
-	notification   map[uuid.UUID][]byte
-	website        map[uuid.UUID][]byte
-	replication    map[uuid.UUID][]byte
-	logging        map[uuid.UUID][]byte
-	tagging        map[uuid.UUID][]byte
-	placements     map[uuid.UUID]map[string]int
-	clusterStates  map[string]meta.ClusterStateRow
-	bucketQuotas   map[uuid.UUID][]byte
-	userQuotas     map[string][]byte
-	bucketStats    map[uuid.UUID]meta.BucketStats
-	userStats      map[string]meta.UserStats
-	bucketOwners   map[uuid.UUID]string
-	usageAggs      map[usageKey]meta.UsageAggregate
+	mu               sync.RWMutex
+	buckets          map[string]*meta.Bucket
+	objects          map[uuid.UUID]map[string][]*meta.Object
+	multiparts       map[uuid.UUID]map[string]*mpState
+	lifecycles       map[uuid.UUID][]byte
+	cors             map[uuid.UUID][]byte
+	policies         map[uuid.UUID][]byte
+	pab              map[uuid.UUID][]byte
+	ownership        map[uuid.UUID][]byte
+	encryption       map[uuid.UUID][]byte
+	objectLock       map[uuid.UUID][]byte
+	notification     map[uuid.UUID][]byte
+	website          map[uuid.UUID][]byte
+	replication      map[uuid.UUID][]byte
+	logging          map[uuid.UUID][]byte
+	tagging          map[uuid.UUID][]byte
+	placements       map[uuid.UUID]map[string]int
+	clusterStates    map[string]meta.ClusterStateRow
+	bucketQuotas     map[uuid.UUID][]byte
+	userQuotas       map[string][]byte
+	bucketStats      map[uuid.UUID]meta.BucketStats
+	userStats        map[string]meta.UserStats
+	bucketOwners     map[uuid.UUID]string
+	usageAggs        map[usageKey]meta.UsageAggregate
 	inventoryConfigs map[uuid.UUID]map[string][]byte
 	accessPoints     map[string]*meta.AccessPoint
-	bucketGrants   map[uuid.UUID][]meta.Grant
-	objectGrants   map[grantKey][]meta.Grant
-	iamUsers       map[string]*meta.IAMUser
-	accessKeys     map[string]*meta.IAMAccessKey
-	managedPolicies map[string]*meta.ManagedPolicy
+	bucketGrants     map[uuid.UUID][]meta.Grant
+	objectGrants     map[grantKey][]meta.Grant
+	iamUsers         map[string]*meta.IAMUser
+	accessKeys       map[string]*meta.IAMAccessKey
+	managedPolicies  map[string]*meta.ManagedPolicy
 	// userPolicies maps userName -> policyArn -> attached_at.
-	userPolicies   map[string]map[string]time.Time
+	userPolicies map[string]map[string]time.Time
 	// policyUsers is the inverse index (policyArn -> set of userNames) used
 	// by DeleteManagedPolicy to detect attachments without scanning.
-	policyUsers    map[string]map[string]struct{}
-	gc             map[string][]meta.GCEntry
-	notifyQueue    map[uuid.UUID][]meta.NotificationEvent
-	notifyDLQ      map[uuid.UUID][]meta.NotificationDLQEntry
+	policyUsers      map[string]map[string]struct{}
+	gc               map[string][]meta.GCEntry
+	notifyQueue      map[uuid.UUID][]meta.NotificationEvent
+	notifyDLQ        map[uuid.UUID][]meta.NotificationDLQEntry
 	replicationQueue map[uuid.UUID][]meta.ReplicationEvent
-	accessLogQueue map[uuid.UUID][]meta.AccessLogEntry
-	auditLog       map[uuid.UUID][]auditEntry
-	mpDone         map[completionKey]*completionEntry
-	rewrapProgress map[uuid.UUID]*meta.RewrapProgress
-	reshardJobs    map[uuid.UUID]*meta.ReshardJob
+	accessLogQueue   map[uuid.UUID][]meta.AccessLogEntry
+	auditLog         map[uuid.UUID][]auditEntry
+	mpDone           map[completionKey]*completionEntry
+	rewrapProgress   map[uuid.UUID]*meta.RewrapProgress
+	reshardJobs      map[uuid.UUID]*meta.ReshardJob
+	reconcileJobs    map[string]*meta.ReconcileJob
 	// objectManifestRaw mirrors per-object manifest blobs in the on-the-wire
 	// format (JSON or proto, per data.SetManifestFormat). Populated by
 	// PutObject and mutated by UpdateObjectManifestRaw — used by the manifest
 	// rewriter (US-049) to detect and convert pre-existing JSON rows.
 	objectManifestRaw map[manifestKey][]byte
-	adminJobs      map[string]*meta.AdminJob
-	locker         *Locker
+	adminJobs         map[string]*meta.AdminJob
+	locker            *Locker
 }
 
 type manifestKey struct {
@@ -116,50 +117,51 @@ type mpState struct {
 
 func New() *Store {
 	return &Store{
-		buckets:      make(map[string]*meta.Bucket),
-		objects:      make(map[uuid.UUID]map[string][]*meta.Object),
-		multiparts:   make(map[uuid.UUID]map[string]*mpState),
-		lifecycles:   make(map[uuid.UUID][]byte),
-		cors:         make(map[uuid.UUID][]byte),
-		policies:     make(map[uuid.UUID][]byte),
-		pab:          make(map[uuid.UUID][]byte),
-		ownership:    make(map[uuid.UUID][]byte),
-		encryption:   make(map[uuid.UUID][]byte),
-		objectLock:   make(map[uuid.UUID][]byte),
-		notification: make(map[uuid.UUID][]byte),
-		website:      make(map[uuid.UUID][]byte),
-		replication:  make(map[uuid.UUID][]byte),
-		logging:      make(map[uuid.UUID][]byte),
-		tagging:      make(map[uuid.UUID][]byte),
-		placements:   make(map[uuid.UUID]map[string]int),
-		clusterStates: make(map[string]meta.ClusterStateRow),
-		bucketQuotas: make(map[uuid.UUID][]byte),
-		userQuotas:   make(map[string][]byte),
-		bucketStats:  make(map[uuid.UUID]meta.BucketStats),
-		userStats:    make(map[string]meta.UserStats),
-		bucketOwners: make(map[uuid.UUID]string),
-		usageAggs:    make(map[usageKey]meta.UsageAggregate),
-		inventoryConfigs: make(map[uuid.UUID]map[string][]byte),
-		accessPoints:     make(map[string]*meta.AccessPoint),
-		bucketGrants: make(map[uuid.UUID][]meta.Grant),
-		objectGrants: make(map[grantKey][]meta.Grant),
-		iamUsers:     make(map[string]*meta.IAMUser),
-		accessKeys:   make(map[string]*meta.IAMAccessKey),
-		managedPolicies: make(map[string]*meta.ManagedPolicy),
-		userPolicies:    make(map[string]map[string]time.Time),
-		policyUsers:     make(map[string]map[string]struct{}),
-		gc:             make(map[string][]meta.GCEntry),
-		notifyQueue:    make(map[uuid.UUID][]meta.NotificationEvent),
-		notifyDLQ:      make(map[uuid.UUID][]meta.NotificationDLQEntry),
-		replicationQueue: make(map[uuid.UUID][]meta.ReplicationEvent),
-		accessLogQueue: make(map[uuid.UUID][]meta.AccessLogEntry),
-		auditLog:       make(map[uuid.UUID][]auditEntry),
-		mpDone:         make(map[completionKey]*completionEntry),
-		rewrapProgress: make(map[uuid.UUID]*meta.RewrapProgress),
-		reshardJobs:    make(map[uuid.UUID]*meta.ReshardJob),
+		buckets:           make(map[string]*meta.Bucket),
+		objects:           make(map[uuid.UUID]map[string][]*meta.Object),
+		multiparts:        make(map[uuid.UUID]map[string]*mpState),
+		lifecycles:        make(map[uuid.UUID][]byte),
+		cors:              make(map[uuid.UUID][]byte),
+		policies:          make(map[uuid.UUID][]byte),
+		pab:               make(map[uuid.UUID][]byte),
+		ownership:         make(map[uuid.UUID][]byte),
+		encryption:        make(map[uuid.UUID][]byte),
+		objectLock:        make(map[uuid.UUID][]byte),
+		notification:      make(map[uuid.UUID][]byte),
+		website:           make(map[uuid.UUID][]byte),
+		replication:       make(map[uuid.UUID][]byte),
+		logging:           make(map[uuid.UUID][]byte),
+		tagging:           make(map[uuid.UUID][]byte),
+		placements:        make(map[uuid.UUID]map[string]int),
+		clusterStates:     make(map[string]meta.ClusterStateRow),
+		bucketQuotas:      make(map[uuid.UUID][]byte),
+		userQuotas:        make(map[string][]byte),
+		bucketStats:       make(map[uuid.UUID]meta.BucketStats),
+		userStats:         make(map[string]meta.UserStats),
+		bucketOwners:      make(map[uuid.UUID]string),
+		usageAggs:         make(map[usageKey]meta.UsageAggregate),
+		inventoryConfigs:  make(map[uuid.UUID]map[string][]byte),
+		accessPoints:      make(map[string]*meta.AccessPoint),
+		bucketGrants:      make(map[uuid.UUID][]meta.Grant),
+		objectGrants:      make(map[grantKey][]meta.Grant),
+		iamUsers:          make(map[string]*meta.IAMUser),
+		accessKeys:        make(map[string]*meta.IAMAccessKey),
+		managedPolicies:   make(map[string]*meta.ManagedPolicy),
+		userPolicies:      make(map[string]map[string]time.Time),
+		policyUsers:       make(map[string]map[string]struct{}),
+		gc:                make(map[string][]meta.GCEntry),
+		notifyQueue:       make(map[uuid.UUID][]meta.NotificationEvent),
+		notifyDLQ:         make(map[uuid.UUID][]meta.NotificationDLQEntry),
+		replicationQueue:  make(map[uuid.UUID][]meta.ReplicationEvent),
+		accessLogQueue:    make(map[uuid.UUID][]meta.AccessLogEntry),
+		auditLog:          make(map[uuid.UUID][]auditEntry),
+		mpDone:            make(map[completionKey]*completionEntry),
+		rewrapProgress:    make(map[uuid.UUID]*meta.RewrapProgress),
+		reshardJobs:       make(map[uuid.UUID]*meta.ReshardJob),
+		reconcileJobs:     make(map[string]*meta.ReconcileJob),
 		objectManifestRaw: make(map[manifestKey][]byte),
-		adminJobs:      make(map[string]*meta.AdminJob),
-		locker:         NewLocker(),
+		adminJobs:         make(map[string]*meta.AdminJob),
+		locker:            NewLocker(),
 	}
 }
 
@@ -1437,6 +1439,19 @@ func (s *Store) SetObjectRestoreStatus(ctx context.Context, bucketID uuid.UUID, 
 		return err
 	}
 	o.RestoreStatus = status
+	return nil
+}
+
+// SetObjectQuarantine sets (reason != "") or clears (reason == "") the
+// object's QuarantineReason (US-003 dangling-manifest pass).
+func (s *Store) SetObjectQuarantine(ctx context.Context, bucketID uuid.UUID, key, versionID, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	o, err := s.findLatest(bucketID, key, versionID)
+	if err != nil {
+		return err
+	}
+	o.QuarantineReason = reason
 	return nil
 }
 
@@ -2979,6 +2994,77 @@ func (s *Store) ListReshardJobs(ctx context.Context) ([]*meta.ReshardJob, error)
 		out = append(out, &cp)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Bucket < out[j].Bucket })
+	return out, nil
+}
+
+func (s *Store) StartReconcile(ctx context.Context, cluster, pool, namespace, bucket, policy string) (*meta.ReconcileJob, error) {
+	if bucket == "" {
+		if !meta.IsValidReconcilePolicy(policy) {
+			return nil, meta.ErrReconcileInvalidPolicy
+		}
+	} else if !meta.IsValidDanglingPolicy(policy) {
+		return nil, meta.ErrReconcileInvalidPolicy
+	}
+	now := time.Now().UTC()
+	job := &meta.ReconcileJob{
+		ID:        uuid.NewString(),
+		Cluster:   cluster,
+		Pool:      pool,
+		Namespace: namespace,
+		Bucket:    bucket,
+		Policy:    policy,
+		State:     meta.ReconcileStateQueued,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *job
+	s.reconcileJobs[job.ID] = &cp
+	out := *job
+	return &out, nil
+}
+
+func (s *Store) GetReconcileJob(ctx context.Context, id string) (*meta.ReconcileJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	j, ok := s.reconcileJobs[id]
+	if !ok {
+		return nil, meta.ErrReconcileNotFound
+	}
+	cp := *j
+	return &cp, nil
+}
+
+func (s *Store) UpdateReconcileJob(ctx context.Context, job *meta.ReconcileJob) error {
+	if job == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.reconcileJobs[job.ID]; !ok {
+		return meta.ErrReconcileNotFound
+	}
+	cp := *job
+	cp.UpdatedAt = time.Now().UTC()
+	s.reconcileJobs[job.ID] = &cp
+	return nil
+}
+
+// ListReconcileJobs returns only queued|running jobs (the worker's drain
+// set); done/error rows persist for status polling but are excluded.
+func (s *Store) ListReconcileJobs(ctx context.Context) ([]*meta.ReconcileJob, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*meta.ReconcileJob, 0, len(s.reconcileJobs))
+	for _, j := range s.reconcileJobs {
+		if j.State != meta.ReconcileStateQueued && j.State != meta.ReconcileStateRunning {
+			continue
+		}
+		cp := *j
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
 }
 

@@ -60,7 +60,9 @@ func Run(t *testing.T, newStore func(t *testing.T) meta.Store) {
 		{"NonDefaultShardRoundTrip", caseNonDefaultShardRoundTrip},
 		{"SampleBucketShardStats", caseSampleBucketShardStats},
 		{"ManifestRawRoundTrip", caseManifestRawRoundTrip},
+		{"ObjectQuarantineRoundTrip", caseObjectQuarantine},
 		{"AdminJobRoundTrip", caseAdminJobRoundTrip},
+		{"ReconcileJobRoundTrip", caseReconcileJobRoundTrip},
 		{"ManagedPolicyCRUD", caseManagedPolicyCRUD},
 		{"UserPolicyAttach", caseUserPolicyAttach},
 		{"IAMAccessKeyDisabled", caseIAMAccessKeyDisabled},
@@ -781,6 +783,68 @@ func caseSSEWrapRotation(t *testing.T, s meta.Store) {
 	prog, err := s.GetRewrapProgress(ctx, b.ID)
 	if err != nil || !prog.Complete || prog.TargetID != "B" || prog.LastKey != "k" {
 		t.Fatalf("progress: %+v err=%v", prog, err)
+	}
+}
+
+// caseObjectQuarantine exercises SetObjectQuarantine (US-003): set a reason ->
+// GetObject reflects it; clear ("") -> back to healthy. Backend parity for the
+// dangling-manifest pass's resolution path.
+func caseObjectQuarantine(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+	b, err := s.CreateBucket(ctx, "quarantine", "owner", "STANDARD")
+	if err != nil {
+		t.Fatalf("create bucket: %v", err)
+	}
+	o := &meta.Object{
+		BucketID:     b.ID,
+		Key:          "k",
+		StorageClass: "STANDARD",
+		ETag:         "deadbeef",
+		Size:         5,
+		Mtime:        time.Now().UTC(),
+		Manifest:     &data.Manifest{Class: "STANDARD"},
+	}
+	if err := s.PutObject(ctx, o, false); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// Healthy by default.
+	got, err := s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.QuarantineReason != "" {
+		t.Fatalf("fresh object quarantined: %q", got.QuarantineReason)
+	}
+
+	// Quarantine sets the reason.
+	const reason = "reconcile: referenced data chunk missing (dangling manifest)"
+	if err := s.SetObjectQuarantine(ctx, b.ID, "k", "", reason); err != nil {
+		t.Fatalf("quarantine: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get after quarantine: %v", err)
+	}
+	if got.QuarantineReason != reason {
+		t.Fatalf("quarantine reason: got %q want %q", got.QuarantineReason, reason)
+	}
+
+	// Clearing restores health.
+	if err := s.SetObjectQuarantine(ctx, b.ID, "k", "", ""); err != nil {
+		t.Fatalf("clear quarantine: %v", err)
+	}
+	got, err = s.GetObject(ctx, b.ID, "k", "")
+	if err != nil {
+		t.Fatalf("get after clear: %v", err)
+	}
+	if got.QuarantineReason != "" {
+		t.Fatalf("quarantine not cleared: %q", got.QuarantineReason)
+	}
+
+	// Missing object surfaces ErrObjectNotFound.
+	if err := s.SetObjectQuarantine(ctx, b.ID, "nope", "", reason); err != meta.ErrObjectNotFound {
+		t.Fatalf("quarantine missing: got %v want ErrObjectNotFound", err)
 	}
 }
 
@@ -2501,6 +2565,199 @@ func caseAdminJobRoundTrip(t *testing.T, s meta.Store) {
 	if err := s.UpdateAdminJob(ctx, &meta.AdminJob{ID: "nonexistent"}); err != meta.ErrAdminJobNotFound {
 		t.Errorf("missing update: %v want ErrAdminJobNotFound", err)
 	}
+}
+
+// caseReconcileJobRoundTrip exercises the reconcile job queue (US-002
+// metadata-data-reconcile): start (policy-validated) -> list (active set) ->
+// update (cursor + counter watermark) -> terminal state drops from the list ->
+// get-by-id still resolves -> invalid policy + missing-id sentinels.
+func caseReconcileJobRoundTrip(t *testing.T, s meta.Store) {
+	ctx := context.Background()
+
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", "bogus"); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("bogus policy: got %v want ErrReconcileInvalidPolicy", err)
+	}
+
+	// restore is an orphan-pass policy (US-002b) — accepted, and its
+	// OrphansRestore counter round-trips through the backend's persistence.
+	rj, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyRestore)
+	if err != nil {
+		t.Fatalf("start restore: %v", err)
+	}
+	if rj.Policy != meta.ReconcilePolicyRestore {
+		t.Fatalf("restore start round-trip: %+v", rj)
+	}
+	rj.State = meta.ReconcileStateRunning
+	rj.OrphansFound = 5
+	rj.OrphansRestore = 4
+	rj.OrphansReport = 1
+	if err := s.UpdateReconcileJob(ctx, rj); err != nil {
+		t.Fatalf("update restore: %v", err)
+	}
+	gotRJ, err := s.GetReconcileJob(ctx, rj.ID)
+	if err != nil {
+		t.Fatalf("get restore: %v", err)
+	}
+	if gotRJ.OrphansFound != 5 || gotRJ.OrphansRestore != 4 || gotRJ.OrphansReport != 1 {
+		t.Fatalf("restore counter round-trip: %+v", gotRJ)
+	}
+	gotRJ.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, gotRJ); err != nil {
+		t.Fatalf("complete restore: %v", err)
+	}
+	// quarantine is a dangling-only policy — invalid for an orphan (no-bucket) job.
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyQuarantine); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("quarantine on orphan job: got %v want ErrReconcileInvalidPolicy", err)
+	}
+	// gc is an orphan-only policy — invalid for a dangling (bucket-set) job.
+	if _, err := s.StartReconcile(ctx, "", "", "", "bkt-uuid", meta.ReconcilePolicyGC); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("gc on dangling job: got %v want ErrReconcileInvalidPolicy", err)
+	}
+
+	// A dangling (bucket-scoped) job round-trips its counters + accepts quarantine.
+	dj, err := s.StartReconcile(ctx, "", "", "", "bkt-uuid", meta.ReconcilePolicyQuarantine)
+	if err != nil {
+		t.Fatalf("start dangling: %v", err)
+	}
+	if dj.Bucket != "bkt-uuid" || dj.Policy != meta.ReconcilePolicyQuarantine {
+		t.Fatalf("dangling start round-trip: %+v", dj)
+	}
+	dj.State = meta.ReconcileStateRunning
+	dj.ManifestsScanned = 50
+	dj.Healthy = 47
+	dj.DanglingFound = 3
+	dj.DanglingQuarantine = 3
+	dj.DanglingReport = 0
+	if err := s.UpdateReconcileJob(ctx, dj); err != nil {
+		t.Fatalf("update dangling: %v", err)
+	}
+	gotDJ, err := s.GetReconcileJob(ctx, dj.ID)
+	if err != nil {
+		t.Fatalf("get dangling: %v", err)
+	}
+	if gotDJ.Bucket != "bkt-uuid" || gotDJ.ManifestsScanned != 50 || gotDJ.Healthy != 47 ||
+		gotDJ.DanglingFound != 3 || gotDJ.DanglingQuarantine != 3 {
+		t.Fatalf("dangling counter round-trip: %+v", gotDJ)
+	}
+	gotDJ.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, gotDJ); err != nil {
+		t.Fatalf("complete dangling: %v", err)
+	}
+
+	// delete is a dangling-only policy (US-003b) — accepted for a bucket-set
+	// job, and its DanglingDelete counter round-trips.
+	ddj, err := s.StartReconcile(ctx, "", "", "", "bkt-uuid", meta.ReconcilePolicyDelete)
+	if err != nil {
+		t.Fatalf("start dangling delete: %v", err)
+	}
+	if ddj.Policy != meta.ReconcilePolicyDelete {
+		t.Fatalf("dangling delete policy round-trip: %+v", ddj)
+	}
+	ddj.State = meta.ReconcileStateRunning
+	ddj.DanglingFound = 2
+	ddj.DanglingDelete = 2
+	if err := s.UpdateReconcileJob(ctx, ddj); err != nil {
+		t.Fatalf("update dangling delete: %v", err)
+	}
+	gotDDJ, err := s.GetReconcileJob(ctx, ddj.ID)
+	if err != nil {
+		t.Fatalf("get dangling delete: %v", err)
+	}
+	if gotDDJ.DanglingFound != 2 || gotDDJ.DanglingDelete != 2 {
+		t.Fatalf("dangling delete counter round-trip: %+v", gotDDJ)
+	}
+	gotDDJ.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, gotDDJ); err != nil {
+		t.Fatalf("complete dangling delete: %v", err)
+	}
+	// delete is invalid for an orphan (no-bucket) job.
+	if _, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "", "", meta.ReconcilePolicyDelete); err != meta.ErrReconcileInvalidPolicy {
+		t.Errorf("delete on orphan job: got %v want ErrReconcileInvalidPolicy", err)
+	}
+
+	job, err := s.StartReconcile(ctx, "ceph-a", "strata-data", "cls-cold", "", meta.ReconcilePolicyReport)
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if job.ID == "" || job.State != meta.ReconcileStateQueued || job.Policy != meta.ReconcilePolicyReport {
+		t.Fatalf("start round-trip: %+v", job)
+	}
+	if job.Cluster != "ceph-a" || job.Pool != "strata-data" || job.Namespace != "cls-cold" {
+		t.Fatalf("start scope: %+v", job)
+	}
+
+	// Queued jobs appear in the worker's drain set.
+	active, err := s.ListReconcileJobs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if !containsReconcileID(active, job.ID) {
+		t.Fatalf("queued job missing from list: %+v", active)
+	}
+
+	// Worker advances the cursor + counters and flips to running.
+	job.State = meta.ReconcileStateRunning
+	job.Cursor = "pg-42"
+	job.Scanned = 1000
+	job.OrphansFound = 3
+	job.OrphansReport = 3
+	job.AbsentBackref = 1
+	if err := s.UpdateReconcileJob(ctx, job); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	got, err := s.GetReconcileJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.State != meta.ReconcileStateRunning || got.Cursor != "pg-42" ||
+		got.Scanned != 1000 || got.OrphansFound != 3 || got.OrphansReport != 3 || got.AbsentBackref != 1 {
+		t.Fatalf("update round-trip: %+v", got)
+	}
+
+	// Running jobs are still in the drain set.
+	active, err = s.ListReconcileJobs(ctx)
+	if err != nil {
+		t.Fatalf("re-list: %v", err)
+	}
+	if !containsReconcileID(active, job.ID) {
+		t.Fatalf("running job missing from list: %+v", active)
+	}
+
+	// Terminal state drops the job from the drain set but stays gettable.
+	got.State = meta.ReconcileStateDone
+	if err := s.UpdateReconcileJob(ctx, got); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+	active, err = s.ListReconcileJobs(ctx)
+	if err != nil {
+		t.Fatalf("post-done list: %v", err)
+	}
+	if containsReconcileID(active, job.ID) {
+		t.Fatalf("done job still in drain set: %+v", active)
+	}
+	done, err := s.GetReconcileJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("get done: %v", err)
+	}
+	if done.State != meta.ReconcileStateDone {
+		t.Fatalf("done state: %+v", done)
+	}
+
+	if _, err := s.GetReconcileJob(ctx, "nonexistent"); err != meta.ErrReconcileNotFound {
+		t.Errorf("missing get: %v want ErrReconcileNotFound", err)
+	}
+	if err := s.UpdateReconcileJob(ctx, &meta.ReconcileJob{ID: "nonexistent"}); err != meta.ErrReconcileNotFound {
+		t.Errorf("missing update: %v want ErrReconcileNotFound", err)
+	}
+}
+
+func containsReconcileID(jobs []*meta.ReconcileJob, id string) bool {
+	for _, j := range jobs {
+		if j.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // caseManagedPolicyCRUD exercises the ManagedPolicy storage surface (US-010):
