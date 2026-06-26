@@ -17,8 +17,8 @@ jobs:
       STRATA_SCYLLA_TEST: '1'
       STRATA_SCYLLA_IMAGE: 'scylladb/scylla:5.4'
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
