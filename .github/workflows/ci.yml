@@ -17,18 +17,18 @@ jobs:
     name: Web console bundle (Vite)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: '9'
           run_install: false
       - name: Get pnpm store dir
         id: pnpm-store
         run: echo "dir=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
@@ -40,7 +40,7 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm run typecheck
           pnpm run build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: web-dist
           path: web/dist
@@ -51,7 +51,7 @@ jobs:
     name: Lint lab nginx config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: nginx -t deploy/nginx/strata-lab.conf
         run: make lint-nginx-lab
 
@@ -60,12 +60,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: web-build
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -126,12 +126,12 @@ jobs:
       matrix:
         axis: [main, cephimpl]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -153,7 +153,7 @@ jobs:
           fi
       - name: Upload findings (JSON)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: govulncheck-${{ matrix.axis }}
           path: govulncheck-results/
@@ -187,8 +187,8 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -199,7 +199,7 @@ jobs:
       # match. Without -no-fail, the action exits 1 on any MEDIUM+
       # finding — hard-fail gate.
       - name: gosec (MEDIUM+ gate, SARIF emit)
-        uses: securego/gosec@4a3bd8af174872c778439083ded7adbf3747e770 # v2.26.1
+        uses: securego/gosec@9e6a9843d7a4a6e3e9a8539b02612c8a4aa3f889 # v2.27.1
         with:
           args: '-severity=medium -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -exclude-dir=internal/data/rados/cephimpl -fmt=sarif -out=gosec.sarif ./...'
       # SHA-pinned third-party action (US-003 AC):
@@ -207,18 +207,18 @@ jobs:
       #       03e4368ac7daa2bd82b3e85262f3bf87ee112f57 (annotated tag commit)
       - name: Upload gosec SARIF to Code Scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
           sarif_file: 'gosec.sarif'
           category: 'gosec'
       - name: gosec (LOW WARN-only)
         if: always()
-        uses: securego/gosec@4a3bd8af174872c778439083ded7adbf3747e770 # v2.26.1
+        uses: securego/gosec@9e6a9843d7a4a6e3e9a8539b02612c8a4aa3f889 # v2.27.1
         with:
           args: '-severity=low -exclude=G101,G104,G115,G304,G401,G501,G505,G703,G704,G705,G709 -exclude-dir=internal/racetest -exclude-dir=scripts -exclude-dir=internal/data/rados/cephimpl -no-fail -fmt=json -out=gosec-low.json ./...'
       - name: Upload gosec artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gosec-reports
           path: |
@@ -245,8 +245,8 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build gateway image
         run: docker build -f deploy/docker/Dockerfile -t strata:ceph .
       # SHA-pinned third-party actions (US-002 AC):
@@ -265,7 +265,7 @@ jobs:
           trivy-config: 'trivy.yaml'
       - name: Upload CRITICAL SARIF to Code Scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@03e4368ac7daa2bd82b3e85262f3bf87ee112f57 # v3.36.0
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
           sarif_file: 'trivy-critical.sarif'
           category: 'trivy-critical'
@@ -284,7 +284,7 @@ jobs:
           # severity input above stays authoritative.
       - name: Upload HIGH JSON artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trivy-high
           path: trivy-high.json
@@ -306,7 +306,7 @@ jobs:
       matrix:
         axis: [main, cephimpl]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # setup-go with go-version '1.25' resolves to the latest 1.25.x
       # patch (>=1.25.11 — bumped to pick up the GO-2026-5037/5039 stdlib
       # fix). go-licenses v1.6.0 MUST be built with that toolchain — built
@@ -314,11 +314,11 @@ jobs:
       # projects" (upstream issue #128). The repo's go.mod `go 1.25.11`
       # directive + GOTOOLCHAIN=auto guarantee the `go install` below picks
       # the working toolchain.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -346,7 +346,7 @@ jobs:
           fi
       - name: Upload license report (CSV)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: license-report-${{ matrix.axis }}
           path: license-results/
@@ -358,12 +358,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: web-build
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -374,12 +374,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: web-build
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -400,7 +400,7 @@ jobs:
       - name: Coverage ratchet gate
         run: make coverage-gate
       - name: Upload regenerated report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: qa-readiness-report
           path: tasks/qa-readiness-report.md
@@ -410,12 +410,12 @@ jobs:
     runs-on: ubuntu-latest
     needs: web-build
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -440,7 +440,7 @@ jobs:
     name: Docker build (librados linking)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Plain docker build (gha-cache reverted): measured net SLOWER for the
       # multi-GB ceph base — cache-to mode=max re-exports the huge layers to
       # the Actions cache (the base is pulled from quay regardless), costing
@@ -456,8 +456,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: docker-build
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build images
         run: |
           docker build -f deploy/docker/Dockerfile -t strata:ceph .
@@ -513,7 +513,7 @@ jobs:
 
       - name: Upload CI logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs
           path: ci-logs/
@@ -534,8 +534,8 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ciSK
       AWS_DEFAULT_REGION: us-east-1
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - name: Build images
         run: |
           docker build -f deploy/docker/Dockerfile -t strata:ceph .
@@ -576,7 +576,7 @@ jobs:
 
       - name: Upload CI logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-full-logs
           path: ci-logs/
@@ -588,29 +588,29 @@ jobs:
     runs-on: ubuntu-latest
     needs: web-build
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: '9'
           run_install: false
       - name: Get pnpm store dir
         id: pnpm-store
         run: echo "dir=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
       - name: Download web bundle
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: web-dist
           path: web/dist
@@ -619,7 +619,7 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Cache Playwright browsers
         id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
@@ -648,7 +648,7 @@ jobs:
         run: pnpm exec playwright test storage.spec.ts
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-ui-report
           path: web/playwright-report/
@@ -670,23 +670,23 @@ jobs:
       STRATA_STATIC_CREDENTIALS: ciAK:ciSK:ci
       STRATA_WORKERS: gc,lifecycle
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.25'
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: '9'
           run_install: false
       - name: Get pnpm store dir
         id: pnpm-store
         run: echo "dir=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.dir }}
           key: ${{ runner.os }}-pnpm-${{ hashFiles('web/pnpm-lock.yaml') }}
@@ -704,7 +704,7 @@ jobs:
         working-directory: web
         run: pnpm install --frozen-lockfile
       - name: Cache Playwright browsers
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ hashFiles('web/pnpm-lock.yaml') }}
@@ -726,7 +726,7 @@ jobs:
           docker compose -f deploy/docker/docker-compose.yml ps > ci-logs/compose-ps.txt 2>&1 || true
       - name: Upload CI logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-ui-multi-replica-logs
           path: ci-logs/
@@ -734,7 +734,7 @@ jobs:
           retention-days: 14
       - name: Upload Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-ui-multi-replica-report
           path: web/playwright-report/

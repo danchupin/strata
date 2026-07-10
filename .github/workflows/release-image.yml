@@ -65,13 +65,13 @@ jobs:
       image: ${{ env.IMAGE_NAME }}
       digest: ${{ steps.push.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # SHA-pinned third-party action (US-006 AC / S1):
       #   docker/login-action v4.2.0 →
       #       650006c6eb7dba73a995cc03b0b2d7f5ca915bee
       - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -83,7 +83,7 @@ jobs:
       # Tags the v* ref as :<version> and promotes :latest on any v* tag.
       - name: Derive image tags + labels
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
@@ -103,7 +103,7 @@ jobs:
       # attestation manifest would feed the generator the wrong digest).
       - name: Build + push
         id: push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: deploy/docker/Dockerfile
@@ -155,7 +155,7 @@ jobs:
       # SHA-pinned third-party action (reused from build job): docker/login-action
       #   v4.2.0 → 650006c6eb7dba73a995cc03b0b2d7f5ca915bee
       - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -183,7 +183,7 @@ jobs:
       # push (workflow_dispatch of a branch has no release to attach to).
       - name: Attach SBOM to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
         with:
           files: strata-${{ github.ref_name }}-sbom.spdx.json
           fail_on_unmatched_files: true
@@ -219,7 +219,7 @@ jobs:
       # SHA-pinned third-party action (reused from build job): docker/login-action
       #   v4.2.0 → 650006c6eb7dba73a995cc03b0b2d7f5ca915bee
       - name: Log in to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
